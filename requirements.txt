@@ -8,3 +8,4 @@ faiss-cpu
 openai
 tiktoken
 pytest
+datasets
