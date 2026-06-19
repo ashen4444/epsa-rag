@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epsa-rag"
+version = "0.1.0"
+description = "Evidence Path Sufficiency Algorithm for Token-Efficient Retrieval-Augmented Generation"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "EPSA-RAG Research Project" }
+]
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "pydantic",
+    "tqdm",
+    "rank-bm25",
+    "faiss-cpu",
+    "openai",
+    "tiktoken"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"

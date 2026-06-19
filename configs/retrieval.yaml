@@ -1,0 +1,22 @@
+retrieval:
+  top_k: 20
+  bm25_top_k: 50
+  dense_top_k: 50
+  fusion_method: "rrf"
+  rrf_k: 60
+
+bm25:
+  lowercase: true
+  remove_punctuation: true
+
+dense:
+  provider: "openai"
+  model_name: "text-embedding-3-small"
+  normalize_embeddings: true
+  batch_size: 32
+
+paths:
+  processed_corpus: "data/processed/hotpotqa_paragraph_chunks.jsonl"
+  bm25_index: "data/indexes/bm25/bm25_index.pkl"
+  dense_index: "data/indexes/dense/faiss_index.bin"
+  dense_metadata: "data/indexes/dense/dense_metadata.json"

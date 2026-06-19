@@ -1,0 +1,62 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project data artifacts
+data/raw/**/*.json
+data/raw/**/*.jsonl
+data/raw/**/*.csv
+data/raw/**/*.parquet
+data/processed/**/*.json
+data/processed/**/*.jsonl
+data/processed/**/*.csv
+data/indexes/**/*.pkl
+data/indexes/**/*.bin
+data/indexes/**/*.faiss
+data/indexes/**/*.npy
+data/indexes/**/*.json
+data/results/**/*.json
+data/results/**/*.jsonl
+data/results/**/*.csv
+data/results/**/*.md
+
+# Outputs
+outputs/logs/*
+outputs/tables/*
+outputs/reports/*
+
+# Keep directory placeholders
+!**/.gitkeep

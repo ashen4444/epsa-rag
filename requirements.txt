@@ -1,0 +1,10 @@
+numpy
+pandas
+pyyaml
+pydantic
+tqdm
+rank-bm25
+faiss-cpu
+openai
+tiktoken
+pytest

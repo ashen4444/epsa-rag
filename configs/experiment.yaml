@@ -1,0 +1,18 @@
+experiment:
+  name: "hybrid_retriever_baseline"
+  dataset: "hotpotqa"
+  split: "train"
+  sample_size: 100
+  random_seed: 42
+
+evaluation:
+  k_values: [5, 10, 20]
+  save_json: true
+  save_csv: true
+  save_markdown_report: true
+
+outputs:
+  results_dir: "data/results"
+  logs_dir: "outputs/logs"
+  tables_dir: "outputs/tables"
+  reports_dir: "outputs/reports"
