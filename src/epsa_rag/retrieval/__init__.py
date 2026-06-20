@@ -1,15 +1,15 @@
-from epsa_rag.retrieval.bm25_retriever import BM25Retriever
-from epsa_rag.retrieval.dense_index import DenseSearchHit, FaissDenseIndex
-from epsa_rag.retrieval.dense_retriever import DenseRetriever
-from epsa_rag.retrieval.embedding_backend import OpenAITextEmbedder, TextEmbedder
-from epsa_rag.retrieval.retrieval_result import RetrievalResult
+from epsa_rag.retrieval.fusion import (
+    HybridFusionTrace,
+    reciprocal_rank_fusion,
+    reciprocal_rank_fusion_with_trace,
+    reciprocal_rank_score,
+)
+from epsa_rag.retrieval.hybrid_retriever import HybridRetriever
 
 __all__ = [
-    "BM25Retriever",
-    "DenseRetriever",
-    "DenseSearchHit",
-    "FaissDenseIndex",
-    "OpenAITextEmbedder",
-    "RetrievalResult",
-    "TextEmbedder",
+    "HybridFusionTrace",
+    "HybridRetriever",
+    "reciprocal_rank_fusion",
+    "reciprocal_rank_fusion_with_trace",
+    "reciprocal_rank_score",
 ]
