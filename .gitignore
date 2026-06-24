@@ -61,3 +61,5 @@ outputs/reports/*
 # Keep directory placeholders
 !**/.gitkeep
 outputs/inspections/
+
+outputs/retrieval_eval/
