@@ -3,7 +3,7 @@ retrieval:
   bm25_top_k: 50
   dense_top_k: 50
   fusion_method: "rrf"
-  rrf_k: 60
+  rrf_k: 10
 
 bm25:
   lowercase: true
