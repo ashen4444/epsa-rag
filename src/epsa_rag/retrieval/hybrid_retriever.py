@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from epsa_rag.retrieval.fusion import reciprocal_rank_fusion
 from epsa_rag.retrieval.retrieval_result import RetrievalResult
 
+from epsa_rag.retrieval.fusion import (
+    HybridFusionTrace,
+    reciprocal_rank_fusion,
+    reciprocal_rank_fusion_with_trace,
+)
 
 @runtime_checkable
 class RankedRetriever(Protocol):
@@ -175,4 +179,42 @@ class HybridRetriever:
             final_top_k=final_top_k,
             rrf_k=self.rrf_k,
             retriever_name=self.retriever_name,
+        )
+
+    
+    def search_with_trace(
+        self,
+        query: str,
+        top_k: int | None = None,
+    ) -> list[HybridFusionTrace]:
+        """
+        Search using BM25 + dense retrieval and return detailed RRF fusion traces.
+
+        This method is intended for analysis/debugging only.
+        The production public retrieval output remains search(), which returns
+        list[RetrievalResult].
+        """
+
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a non-empty string.")
+
+        final_top_k = self.final_top_k if top_k is None else top_k
+        _validate_positive_int("top_k", final_top_k)
+
+        clean_query = query.strip()
+
+        bm25_results = self.bm25_retriever.search(
+            clean_query,
+            top_k=self.bm25_top_k,
+        )
+        dense_results = self.dense_retriever.search(
+            clean_query,
+            top_k=self.dense_top_k,
+        )
+
+        return reciprocal_rank_fusion_with_trace(
+            bm25_results=bm25_results,
+            dense_results=dense_results,
+            final_top_k=final_top_k,
+            rrf_k=self.rrf_k,
         )
