@@ -63,3 +63,9 @@ outputs/reports/*
 outputs/inspections/
 
 outputs/retrieval_eval/
+
+# RAG experiment outputs
+outputs/rag_baseline/
+
+# Temporary inspection scripts
+scripts/tmp_*.py
