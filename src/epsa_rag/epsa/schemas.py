@@ -210,3 +210,35 @@ class EvidencePath:
     answer_type: str | None
     score: float
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SufficiencyDecision:
+    """Rule-based decision about whether candidate evidence is answer-sufficient."""
+
+    sufficient: bool
+    confidence: float
+    question_type: str
+    best_path: EvidencePath | None
+    selected_evidence_unit_ids: list[str]
+    selected_chunk_ids: list[str]
+    answer_candidate: str | None
+    answer_type: str | None
+    missing_evidence: str | None
+    decision_reason: str
+    rule_trace: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PrunedContext:
+    """Sentence-level context selected for final answer generation."""
+
+    selected_chunk_ids: list[str]
+    selected_evidence_unit_ids: list[str]
+    selected_sentences: list[str]
+    selected_context_text: str
+    estimated_context_tokens: int
+    pruning_strategy: str
+    removed_evidence_unit_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)

@@ -17,6 +17,9 @@ from epsa_rag.epsa.schemas import EvidenceUnit, ScoredEvidenceUnit
 from epsa_rag.epsa.evidence_graph_builder import EvidenceGraphBuilder
 from epsa_rag.epsa.evidence_path_searcher import EvidencePathSearcher
 from epsa_rag.epsa.schemas import EvidenceGraph, EvidenceGraphEdge, EvidenceGraphNode, EvidencePath
+from epsa_rag.epsa.sufficiency_decision_engine import SufficiencyDecisionEngine
+from epsa_rag.epsa.context_pruner import ContextPruner
+from epsa_rag.epsa.schemas import SufficiencyDecision, PrunedContext
 
 
 __all__ = [
@@ -39,4 +42,8 @@ __all__ = [
     "EvidencePath",
     "EvidenceGraphBuilder",
     "EvidencePathSearcher",
+    "SufficiencyDecision",
+    "SufficiencyDecisionEngine",
+    "PrunedContext",
+    "ContextPruner",
 ]
