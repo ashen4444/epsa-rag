@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Optional
-
+from dataclasses import dataclass, field
 
 class QuestionType(str, Enum):
     """Supported question categories used by EPSA."""
@@ -127,3 +127,29 @@ class CandidateChunkEvidence:
         for candidate in data["answer_type_candidates"]:
             candidate["answer_type"] = candidate["answer_type"].value
         return data
+
+
+@dataclass(frozen=True)
+class EvidenceUnit:
+    evidence_unit_id: str
+    chunk_id: str
+    doc_title: str
+    paragraph_index: int
+    sentence_id: int
+    sentence_text: str
+    resolved_text: str
+    entities: list[str] = field(default_factory=list)
+    relation_hints: list[str] = field(default_factory=list)
+    answer_type_candidates: list[str] = field(default_factory=list)
+    question_entity_overlap: list[str] = field(default_factory=list)
+    question_token_overlap: float = 0.0
+    is_supporting_sentence: bool | None = None
+    retrieval_rank: int | None = None
+    retrieval_score: float | None = None
+
+
+@dataclass(frozen=True)
+class ScoredEvidenceUnit:
+    evidence_unit: EvidenceUnit
+    final_score: float
+    score_breakdown: dict[str, float] = field(default_factory=dict)

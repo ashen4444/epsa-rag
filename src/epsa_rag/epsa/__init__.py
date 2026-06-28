@@ -11,6 +11,9 @@ from epsa_rag.epsa.schemas import (
     QuestionType,
     RelationHint,
 )
+from epsa_rag.epsa.evidence_unit_extractor import EvidenceUnitExtractor
+from epsa_rag.epsa.evidence_scorer import EvidenceScorer
+from epsa_rag.epsa.schemas import EvidenceUnit, ScoredEvidenceUnit
 
 __all__ = [
     "AnswerType",
@@ -22,4 +25,8 @@ __all__ = [
     "QuestionAnalyzer",
     "QuestionType",
     "RelationHint",
+    "EvidenceUnit",
+    "ScoredEvidenceUnit",
+    "EvidenceUnitExtractor",
+    "EvidenceScorer",
 ]
