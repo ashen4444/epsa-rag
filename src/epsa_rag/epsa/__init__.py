@@ -14,6 +14,10 @@ from epsa_rag.epsa.schemas import (
 from epsa_rag.epsa.evidence_unit_extractor import EvidenceUnitExtractor
 from epsa_rag.epsa.evidence_scorer import EvidenceScorer
 from epsa_rag.epsa.schemas import EvidenceUnit, ScoredEvidenceUnit
+from epsa_rag.epsa.evidence_graph_builder import EvidenceGraphBuilder
+from epsa_rag.epsa.evidence_path_searcher import EvidencePathSearcher
+from epsa_rag.epsa.schemas import EvidenceGraph, EvidenceGraphEdge, EvidenceGraphNode, EvidencePath
+
 
 __all__ = [
     "AnswerType",
@@ -29,4 +33,10 @@ __all__ = [
     "ScoredEvidenceUnit",
     "EvidenceUnitExtractor",
     "EvidenceScorer",
+    "EvidenceGraph",
+    "EvidenceGraphEdge",
+    "EvidenceGraphNode",
+    "EvidencePath",
+    "EvidenceGraphBuilder",
+    "EvidencePathSearcher",
 ]

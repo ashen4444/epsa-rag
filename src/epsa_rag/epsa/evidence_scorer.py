@@ -24,8 +24,21 @@ def _get_value(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+
     value = getattr(value, "value", value)
     value = getattr(value, "name", value)
+
+    if hasattr(value, "relation"):
+        return str(getattr(value, "relation") or "").strip()
+
+    if hasattr(value, "answer_type"):
+        return _normalize_text(getattr(value, "answer_type"))
+
+    if hasattr(value, "text"):
+        return str(getattr(value, "text") or "").strip()
+
     return str(value or "").strip()
 
 
@@ -34,7 +47,14 @@ def _normalize_label(value: Any) -> str:
 
 
 def _normalize_set(values: Iterable[Any]) -> set[str]:
-    return {str(value).casefold().strip() for value in values if str(value).strip()}
+    normalized_values: set[str] = set()
+
+    for value in values:
+        normalized = _normalize_text(value).casefold().strip()
+        if normalized:
+            normalized_values.add(normalized)
+
+    return normalized_values
 
 
 def _tokenize(text: str) -> set[str]:
@@ -78,7 +98,7 @@ class EvidenceScorer:
         question_text = _normalize_text(
             _get_value(question_analysis, "normalized_question")
             or _get_value(question_analysis, "question")
-            or " ".join(seed_entities)
+            or " ".join(_normalize_text(seed) for seed in seed_entities)
         )
 
         unit_entities = list(evidence_unit.entities or [])
@@ -188,7 +208,7 @@ class EvidenceScorer:
 
         matches = 0
         for seed in seed_entities:
-            normalized_seed = str(seed).casefold().strip()
+            normalized_seed = _normalize_text(seed).casefold().strip()
             if not normalized_seed:
                 continue
 
@@ -248,7 +268,7 @@ class EvidenceScorer:
 
         title = doc_title.casefold().strip()
 
-        if any(title == str(seed).casefold().strip() for seed in seed_entities):
+        if any(title == _normalize_text(seed).casefold().strip() for seed in seed_entities):
             return 1.0
 
         if title and title in question_text.casefold():

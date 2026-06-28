@@ -153,3 +153,60 @@ class ScoredEvidenceUnit:
     evidence_unit: EvidenceUnit
     final_score: float
     score_breakdown: dict[str, float] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class EvidenceGraphNode:
+    """A stable, serializable node in the EPSA evidence graph."""
+
+    node_id: str
+    node_type: str
+    label: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EvidenceGraphEdge:
+    """A stable, serializable weighted edge in the EPSA evidence graph."""
+
+    edge_id: str
+    source_id: str
+    target_id: str
+    edge_type: str
+    weight: float = 1.0
+    evidence_unit_id: str | None = None
+    relation: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EvidenceGraph:
+    """Deterministic graph built from scored sentence-level evidence units."""
+
+    nodes: dict[str, EvidenceGraphNode]
+    edges: list[EvidenceGraphEdge]
+    question_type: str
+    seed_entity_node_ids: list[str] = field(default_factory=list)
+    evidence_unit_node_ids: list[str] = field(default_factory=list)
+    entity_node_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EvidencePath:
+    """Candidate reasoning path found in an EvidenceGraph.
+
+    This is intentionally not a sufficiency decision. It only records a ranked
+    candidate path and its provenance for the later Sufficiency Decision Engine.
+    """
+
+    path_id: str
+    question_type: str
+    node_ids: list[str]
+    edge_ids: list[str]
+    evidence_unit_ids: list[str]
+    entity_chain: list[str]
+    relation_chain: list[str]
+    answer_candidate: str | None
+    answer_type: str | None
+    score: float
+    metadata: dict[str, Any] = field(default_factory=dict)
