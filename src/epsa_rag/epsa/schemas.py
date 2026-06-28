@@ -242,3 +242,38 @@ class PrunedContext:
     pruning_strategy: str
     removed_evidence_unit_ids: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class NextHopQuery:
+    """Deterministic next-hop retrieval query proposed when EPSA is insufficient."""
+
+    query: str | None
+    query_type: str
+    source: str
+    target_entity: str | None = None
+    missing_relation: str | None = None
+    expected_answer_type: str | None = None
+    reason: str = ""
+    confidence: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EPSAControllerResult:
+    """Full structured output from the deterministic EPSA controller."""
+
+    question: str
+    question_analysis: QuestionAnalysis
+    candidate_chunk_evidence: list[CandidateChunkEvidence]
+    evidence_units: list[EvidenceUnit]
+    scored_evidence_units: list[ScoredEvidenceUnit]
+    evidence_graph: EvidenceGraph
+    evidence_paths: list[EvidencePath]
+    sufficiency_decision: SufficiencyDecision
+    pruned_context: PrunedContext
+    next_hop_query: NextHopQuery | None
+    selected_chunk_ids: list[str]
+    selected_evidence_unit_ids: list[str]
+    sufficient: bool
+    metadata: dict[str, Any] = field(default_factory=dict)

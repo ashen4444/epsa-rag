@@ -20,6 +20,9 @@ from epsa_rag.epsa.schemas import EvidenceGraph, EvidenceGraphEdge, EvidenceGrap
 from epsa_rag.epsa.sufficiency_decision_engine import SufficiencyDecisionEngine
 from epsa_rag.epsa.context_pruner import ContextPruner
 from epsa_rag.epsa.schemas import SufficiencyDecision, PrunedContext
+from epsa_rag.epsa.next_query_generator import NextHopQueryGenerator
+from epsa_rag.epsa.epsa_controller import EPSAController
+from epsa_rag.epsa.schemas import NextHopQuery, EPSAControllerResult
 
 
 __all__ = [
@@ -47,3 +50,10 @@ __all__ = [
     "PrunedContext",
     "ContextPruner",
 ]
+
+__all__.extend([
+    "NextHopQuery",
+    "NextHopQueryGenerator",
+    "EPSAControllerResult",
+    "EPSAController",
+])
