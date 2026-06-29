@@ -202,6 +202,15 @@ class SufficiencyDecisionEngine:
             ]
             selected_ids = _dedupe_preserve_order(path.evidence_unit_ids)
 
+            if _is_controller_partial_path(path):
+                trace.append("controller_partial_evidence_fallback=true")
+                best_partial_missing = (
+                    "Only a controller partial-evidence fallback path was available; "
+                    "factoid sufficiency requires a real searched evidence path."
+                )
+                best_partial_trace = trace
+                continue
+
             if not selected_ids:
                 trace.append("supporting_evidence_unit=false")
                 best_partial_missing = "No evidence unit supports the answer candidate."
@@ -246,6 +255,14 @@ class SufficiencyDecisionEngine:
                 best_partial_trace = trace
                 continue
             trace.append(f"relation_matches={matched_relations}/{len(required_relations)}")
+
+            if _generic_answer_type(expected_answer_type) and not required_relations and len(selected_ids) < 2:
+                trace.append("generic_answer_type_single_evidence_unit=true")
+                best_partial_missing = (
+                    "Generic factoid answer type has only one evidence unit and no explicit relation evidence."
+                )
+                best_partial_trace = trace
+                continue
 
             trace.extend(["sufficient=true", "does_not_generate_next_query=true"])
             return self._sufficient(
@@ -625,6 +642,19 @@ def _sentence_node_ids_for_path(graph: EvidenceGraph, path: EvidencePath) -> set
         if node.node_type == "sentence" and node.metadata.get("evidence_unit_id") in wanted_evidence_ids:
             ids.add(node_id)
     return ids
+
+
+def _is_controller_partial_path(path: EvidencePath) -> bool:
+    metadata = dict(getattr(path, "metadata", {}) or {})
+    path_kind = _norm_label(metadata.get("path_kind"))
+    return bool(
+        metadata.get("generated_by_controller_fallback")
+        or path_kind == "controller partial evidence fallback"
+    )
+
+
+def _generic_answer_type(expected_answer_type: str) -> bool:
+    return _norm_label(expected_answer_type) in {"", "unknown", "entity"}
 
 
 def _specific_answer(value: str | None) -> bool:

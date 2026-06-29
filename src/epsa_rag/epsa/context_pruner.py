@@ -46,6 +46,11 @@ class ContextPruner:
             for evidence_id in requested_ids
             if evidence_id in all_units_by_id
         ]
+        selected_units = _expand_bridge_context_if_needed(
+            sufficiency_decision=sufficiency_decision,
+            selected_units=selected_units,
+            scored_evidence_units=scored_evidence_units,
+        )
         selected_units = sorted(selected_units, key=_unit_sort_key)
 
         selected_ids = [item.evidence_unit.evidence_unit_id for item in selected_units]
@@ -65,7 +70,11 @@ class ContextPruner:
         ]
 
         strategy = (
-            "sufficient_path_sentence_pruning"
+            "sufficient_bridge_neighbor_sentence_pruning"
+            if sufficiency_decision.sufficient
+            and sufficiency_decision.question_type == "bridge"
+            and len(selected_ids) > len(requested_ids)
+            else "sufficient_path_sentence_pruning"
             if sufficiency_decision.sufficient
             else "partial_evidence_sentence_pruning"
         )
@@ -93,6 +102,60 @@ class ContextPruner:
                 "calls_llm": False,
             },
         )
+
+
+def _expand_bridge_context_if_needed(
+    *,
+    sufficiency_decision: SufficiencyDecision,
+    selected_units: list[ScoredEvidenceUnit],
+    scored_evidence_units: list[ScoredEvidenceUnit],
+) -> list[ScoredEvidenceUnit]:
+    """Add bounded neighboring sentence context for sufficient bridge paths.
+
+    Bridge answers often need the bridge sentence and the answer-side sentence.
+    The selected evidence IDs are still preserved, but immediate neighbors from
+    the same selected chunks give the final LLM enough local paragraph context
+    without falling back to all retrieved documents.
+    """
+
+    if not sufficiency_decision.sufficient or sufficiency_decision.question_type != "bridge":
+        return selected_units
+
+    if not selected_units:
+        return selected_units
+
+    selected_by_id = {
+        item.evidence_unit.evidence_unit_id: item
+        for item in selected_units
+    }
+    selected_chunk_ids = {
+        item.evidence_unit.chunk_id
+        for item in selected_units
+        if item.evidence_unit.chunk_id
+    }
+    selected_sentence_keys = {
+        (item.evidence_unit.chunk_id, int(item.evidence_unit.sentence_id))
+        for item in selected_units
+    }
+
+    expanded = dict(selected_by_id)
+    for candidate in scored_evidence_units:
+        unit = candidate.evidence_unit
+        if unit.chunk_id not in selected_chunk_ids:
+            continue
+
+        candidate_key = (unit.chunk_id, int(unit.sentence_id))
+        if any(
+            candidate_key[0] == selected_key[0]
+            and abs(candidate_key[1] - selected_key[1]) <= 1
+            for selected_key in selected_sentence_keys
+        ):
+            expanded[unit.evidence_unit_id] = candidate
+
+        if len(expanded) >= 6:
+            break
+
+    return list(expanded.values())
 
 
 def _format_evidence_unit(scored_unit: ScoredEvidenceUnit) -> str:

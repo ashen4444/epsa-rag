@@ -79,7 +79,7 @@ RELATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("directed", (r"\bdirected\b", r"\bdirector\b")),
     ("written", (r"\bwritten\b", r"\bwriter\b", r"\bauthor\b", r"\bnovelist\b")),
     ("located", (r"\blocated\b", r"\bbased in\b", r"\bin\b", r"\bat\b")),
-    ("founded", (r"\bfounded\b", r"\bfounder\b", r"\bestablished\b")),
+    ("founded", (r"\bfounded\b", r"\bfounder\b", r"\bestablished\b", r"\bstarted\b")),
     ("published", (r"\bpublished\b", r"\bpublisher\b")),
     ("released", (r"\breleased\b", r"\brelease date\b")),
     ("starring", (r"\bstarring\b", r"\bstarred\b", r"\bcast\b")),
@@ -183,12 +183,18 @@ def infer_question_type(normalized_question: str, expected_answer_type: AnswerTy
         "which one",
         "which of",
         "same ",
+        "same type",
         "older",
         "younger",
         "larger",
         "smaller",
         "earlier",
         "later",
+        "first",
+        "started first",
+        "born first",
+        "founded first",
+        "released first",
         "more ",
         "less ",
         "higher",
@@ -198,6 +204,18 @@ def infer_question_type(normalized_question: str, expected_answer_type: AnswerTy
     padded = f" {normalized_question} "
     if any(marker in padded for marker in comparison_markers):
         return QuestionType.COMPARISON
+
+    # HotPotQA often phrases binary comparison as:
+    #   "Which X ... A or B?"
+    #   "Who ... David Lee Roth or Cia Berg?"
+    # Treat these as comparison/choice questions instead of single-hop factoids.
+    if (
+        re.search(r"\b(which|who|what)\b", normalized_question)
+        and " or " in padded
+        and normalized_question.endswith("?")
+    ):
+        return QuestionType.COMPARISON
+
     if expected_answer_type == AnswerType.BOOLEAN:
         return QuestionType.YES_NO
 

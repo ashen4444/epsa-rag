@@ -345,6 +345,21 @@ def choose_context_for_final_answer(
     epsa_result: Any | None,
     fallback_documents: Sequence[RAGDocument],
 ) -> tuple[str, str]:
+    """Choose final-answer context with a conservative insufficient fallback.
+
+    EPSA-pruned evidence is safe to send directly when EPSA is sufficient.
+    When EPSA explicitly says the evidence is insufficient, sending only its
+    partial pruned evidence can starve the final answer LLM. In that case, use
+    the merged retrieved documents as a bounded fallback while preserving EPSA's
+    sufficiency decision in the logged record.
+    """
+
+    if _epsa_result_explicitly_insufficient(epsa_result) and fallback_documents:
+        return (
+            format_documents_for_prompt(fallback_documents),
+            "epsa_insufficient_fallback_documents",
+        )
+
     pruned_context = getattr(epsa_result, "pruned_context", None)
     selected_context_text = getattr(pruned_context, "selected_context_text", "") or ""
 
@@ -352,6 +367,17 @@ def choose_context_for_final_answer(
         return selected_context_text.strip(), "epsa_pruned_context"
 
     return format_documents_for_prompt(fallback_documents), "fallback_documents"
+
+
+def _epsa_result_explicitly_insufficient(epsa_result: Any | None) -> bool:
+    if epsa_result is None:
+        return False
+
+    if getattr(epsa_result, "sufficient", None) is False:
+        return True
+
+    decision = getattr(epsa_result, "sufficiency_decision", None)
+    return getattr(decision, "sufficient", None) is False
 
 
 def count_selected_context_docs(
