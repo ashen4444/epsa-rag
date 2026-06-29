@@ -69,3 +69,5 @@ outputs/rag_baseline/
 
 # Temporary inspection scripts
 scripts/tmp_*.py
+
+outputs/
