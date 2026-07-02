@@ -11,6 +11,7 @@ Important boundary:
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 from typing import Any
 
 from epsa_rag.epsa.schemas import (
@@ -120,12 +121,44 @@ class SufficiencyDecisionEngine:
                 continue
             trace.append(f"bridge_entity={bridge_entity}")
 
+            if not _specific_bridge_entity(bridge_entity):
+                trace.append("specific_bridge_entity=false")
+                best_partial_missing = (
+                    f"Bridge entity {bridge_entity} is too generic to support a complete bridge path."
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("specific_bridge_entity=true")
+
+            if not _bridge_entity_grounded_in_answer_side_chunk(
+                bridge_entity=bridge_entity,
+                path=path,
+                evidence_graph=evidence_graph,
+            ):
+                trace.append("bridge_entity_grounded_in_answer_side_chunk=false")
+                best_partial_missing = (
+                    f"Bridge entity {bridge_entity} is not strongly grounded in the answer-side evidence."
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("bridge_entity_grounded_in_answer_side_chunk=true")
+
             if not _specific_answer(path.answer_candidate):
                 trace.append("answer_candidate=false")
                 best_partial_missing = f"Bridge path is incomplete after bridge entity {bridge_entity}."
                 best_partial_trace = trace
                 continue
             trace.append(f"answer_candidate={path.answer_candidate}")
+
+            if not _answer_candidate_label_compatible(path.answer_candidate, expected_answer_type):
+                trace.append("answer_candidate_label_compatible=false")
+                best_partial_missing = (
+                    f"Answer candidate {path.answer_candidate} does not look compatible "
+                    f"with expected answer type {expected_answer_type}."
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("answer_candidate_label_compatible=true")
 
             if not self._answer_type_compatible(path, evidence_graph, expected_answer_type):
                 trace.append("answer_type_compatible=false")
@@ -232,6 +265,16 @@ class SufficiencyDecisionEngine:
                 continue
             trace.append(f"answer_candidate={path.answer_candidate}")
 
+            if not _answer_candidate_label_compatible(path.answer_candidate, expected_answer_type):
+                trace.append("answer_candidate_label_compatible=false")
+                best_partial_missing = (
+                    f"Answer candidate {path.answer_candidate} does not look compatible "
+                    f"with expected answer type {expected_answer_type}."
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("answer_candidate_label_compatible=true")
+
             if not self._answer_type_compatible(path, evidence_graph, expected_answer_type):
                 trace.append("answer_type_compatible=false")
                 best_partial_missing = (
@@ -260,6 +303,14 @@ class SufficiencyDecisionEngine:
                 trace.append("generic_answer_type_single_evidence_unit=true")
                 best_partial_missing = (
                     "Generic factoid answer type has only one evidence unit and no explicit relation evidence."
+                )
+                best_partial_trace = trace
+                continue
+
+            if _question_requires_multi_fact_evidence(question_analysis) and len(selected_ids) < 2:
+                trace.append("complex_factoid_single_evidence_unit=true")
+                best_partial_missing = (
+                    "Question appears to require multiple facts, but the candidate path has only one evidence unit."
                 )
                 best_partial_trace = trace
                 continue
@@ -636,7 +687,11 @@ def _relation_matches_any(required: str, path_relations: list[str]) -> bool:
 
 
 def _sentence_node_ids_for_path(graph: EvidenceGraph, path: EvidencePath) -> set[str]:
-    ids = {node_id for node_id in path.node_ids if graph.nodes.get(node_id, None) and graph.nodes[node_id].node_type == "sentence"}
+    ids = {
+        node_id
+        for node_id in path.node_ids
+        if graph.nodes.get(node_id, None) and graph.nodes[node_id].node_type == "sentence"
+    }
     wanted_evidence_ids = set(path.evidence_unit_ids)
     for node_id, node in graph.nodes.items():
         if node.node_type == "sentence" and node.metadata.get("evidence_unit_id") in wanted_evidence_ids:
@@ -657,11 +712,659 @@ def _generic_answer_type(expected_answer_type: str) -> bool:
     return _norm_label(expected_answer_type) in {"", "unknown", "entity"}
 
 
-def _specific_answer(value: str | None) -> bool:
-    text = _as_text(value)
+def _question_requires_multi_fact_evidence(question_analysis: QuestionAnalysis) -> bool:
+    question = _norm_label(getattr(question_analysis, "raw_question", ""))
+    if not question:
+        question = _norm_label(getattr(question_analysis, "normalized_question", ""))
+
+    nested_markers = (
+        " that ",
+        " who ",
+        " whose ",
+        " which ",
+        " where ",
+        " in which ",
+        " of the ",
+        " part of ",
+        " named after ",
+        " head office ",
+        " headquarters ",
+    )
+    bridge_like_markers = (
+        "director of",
+        "writer of",
+        "written by",
+        "wrote",
+        "screenwriter",
+        "author of",
+        "composer of",
+        "producer of",
+        "founder of",
+        "wife of",
+        "husband of",
+        "father of",
+        "mother of",
+        "member of",
+        "part of",
+    )
+    return any(marker in question for marker in nested_markers) and any(
+        marker in question for marker in bridge_like_markers
+    )
+
+
+def _looks_like_generic_entity_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
     if not text:
         return False
-    return _norm_label(text) not in {
+
+    normalized = _norm_label(text)
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if normalized in _ADJECTIVAL_BRIDGE_ENTITY_BLOCKLIST:
+        return False
+
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    generic_bad_terms = {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "with",
+        "after",
+        "before",
+        "during",
+    }
+    if normalized in generic_bad_terms:
+        return False
+
+    return len(normalized) >= 2
+
+
+def _looks_like_number_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    if re.search(r"\d", text):
+        return True
+
+    number_words = {
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "thirty",
+        "forty",
+        "fifty",
+        "sixty",
+        "seventy",
+        "eighty",
+        "ninety",
+        "hundred",
+        "thousand",
+        "million",
+        "billion",
+    }
+    measurement_words = {
+        "km",
+        "kilometer",
+        "kilometers",
+        "metre",
+        "metres",
+        "meter",
+        "meters",
+        "mile",
+        "miles",
+        "foot",
+        "feet",
+        "year",
+        "years",
+        "old",
+        "age",
+        "percent",
+        "percentage",
+    }
+
+    tokens = set(normalized.split())
+    return bool(tokens.intersection(number_words) or tokens.intersection(measurement_words))
+
+
+def _looks_like_location_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if normalized in _ADJECTIVAL_BRIDGE_ENTITY_BLOCKLIST:
+        return False
+
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    non_location_terms = {
+        "american",
+        "british",
+        "german",
+        "french",
+        "indian",
+        "swedish",
+        "welsh",
+        "european",
+        "asian",
+        "african",
+        "company",
+        "band",
+        "team",
+        "school",
+        "university",
+        "college",
+        "series",
+        "film",
+        "movie",
+        "song",
+        "album",
+        "theatre",
+        "theater",
+        "court",
+    }
+    if normalized in non_location_terms:
+        return False
+
+    organization_markers = (
+        "company",
+        "corporation",
+        "inc",
+        "ltd",
+        "limited",
+        "foundation",
+        "trust",
+        "hospital",
+        "university",
+        "college",
+        "school",
+        "band",
+        "team",
+        "series",
+        "film",
+        "movie",
+        "song",
+        "album",
+    )
+    if any(marker in normalized for marker in organization_markers):
+        return False
+
+    if text.isupper() and len(text) <= 4:
+        return False
+
+    tokens = [token for token in re.split(r"\s+", text) if token]
+    if len(tokens) >= 1 and any(token[:1].isupper() for token in tokens):
+        return True
+
+    return False
+
+
+def _looks_like_date_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    if re.search(r"\b\d{3,4}\b", text):
+        return True
+
+    if any(month in normalized for month in _MONTH_NAMES):
+        return True
+
+    date_words = {"century", "decade", "year"}
+    return bool(set(normalized.split()).intersection(date_words))
+
+
+def _answer_candidate_label_compatible(candidate: str | None, expected_answer_type: str) -> bool:
+    expected = _norm_label(expected_answer_type)
+
+    if expected in {"", "unknown", "entity"}:
+        return _looks_like_generic_entity_candidate(candidate)
+
+    if expected == "number":
+        return _looks_like_number_candidate(candidate)
+
+    if expected == "location":
+        return _looks_like_location_candidate(candidate)
+
+    if expected == "date":
+        return _looks_like_date_candidate(candidate)
+
+    if expected == "boolean":
+        return True
+
+    if expected == "person":
+        return _looks_like_person_candidate(candidate)
+
+    if expected in {"organization", "organisation"}:
+        return _looks_like_organization_candidate(candidate)
+
+    if expected in {"title or work", "title_or_work"}:
+        return _looks_like_title_or_work_candidate(candidate)
+
+    return True
+
+
+def _looks_like_person_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+    non_person_terms = {
+        "city",
+        "country",
+        "state",
+        "county",
+        "school",
+        "university",
+        "college",
+        "company",
+        "organization",
+        "organisation",
+        "band",
+        "team",
+        "film",
+        "movie",
+        "book",
+        "novel",
+        "album",
+        "song",
+        "series",
+        "episode",
+        "character",
+        "magazine",
+        "newspaper",
+        "network",
+        "party",
+        "hotel",
+    }
+    if normalized in non_person_terms:
+        return False
+
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    organization_markers = (
+        "company",
+        "corporation",
+        "inc",
+        "ltd",
+        "limited",
+        "university",
+        "college",
+        "school",
+        "group",
+        "team",
+        "band",
+        "network",
+        "party",
+        "committee",
+        "association",
+        "foundation",
+        "agency",
+        "department",
+        "ministry",
+        "hotel",
+        "theatre",
+        "theater",
+        "series",
+        "film",
+        "movie",
+        "album",
+        "song",
+        "comedy",
+        "musical",
+        "hospital",
+        "trust",
+        "center",
+        "centre",
+        "institute",
+        "fraternity",
+        "sorority",
+    )
+    if any(marker in normalized for marker in organization_markers):
+        return False
+
+    tokens = [token for token in re.split(r"\s+", text) if token]
+    alpha_tokens = [token for token in tokens if re.search(r"[A-Za-z]", token)]
+
+    greek_letter_words = {
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "epsilon",
+        "zeta",
+        "eta",
+        "theta",
+        "iota",
+        "kappa",
+        "lambda",
+        "mu",
+        "nu",
+        "xi",
+        "omicron",
+        "pi",
+        "rho",
+        "sigma",
+        "tau",
+        "upsilon",
+        "phi",
+        "chi",
+        "psi",
+        "omega",
+    }
+    if alpha_tokens and all(token.lower().strip(".,;:()[]{}") in greek_letter_words for token in alpha_tokens):
+        return False
+
+    if len(alpha_tokens) >= 2:
+        return True
+
+    # Conservative calibration:
+    # Do not accept a single capitalized token as a PERSON answer.
+    # This prevents place/work/entity names such as "Broadway" from passing
+    # as person candidates.
+    return False
+
+
+def _looks_like_organization_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    organization_markers = (
+        "company",
+        "corporation",
+        "corp",
+        "inc",
+        "ltd",
+        "limited",
+        "university",
+        "college",
+        "school",
+        "group",
+        "team",
+        "band",
+        "network",
+        "party",
+        "committee",
+        "association",
+        "foundation",
+        "agency",
+        "department",
+        "ministry",
+        "hotel",
+        "club",
+        "league",
+        "institute",
+        "bank",
+        "publisher",
+        "records",
+        "studios",
+    )
+    if any(marker in normalized for marker in organization_markers):
+        return True
+
+    tokens = [token for token in re.split(r"\s+", text) if token]
+    if len(tokens) >= 2 and any(token[:1].isupper() for token in tokens):
+        return True
+
+    if text.isupper() and len(text) >= 2:
+        return True
+
+    return False
+
+
+def _looks_like_title_or_work_candidate(candidate: str | None) -> bool:
+    text = _as_text(candidate).strip()
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    work_markers = (
+        "film",
+        "movie",
+        "book",
+        "novel",
+        "album",
+        "song",
+        "series",
+        "episode",
+        "magazine",
+        "newspaper",
+        "play",
+        "poem",
+        "game",
+    )
+    if any(marker in normalized for marker in work_markers):
+        return True
+
+    tokens = [token for token in re.split(r"\s+", text) if token]
+    if len(tokens) >= 2 and any(token[:1].isupper() for token in tokens):
+        return True
+
+    return False
+
+
+def _bridge_entity_grounded_in_answer_side_chunk(
+    *,
+    bridge_entity: str,
+    path: EvidencePath,
+    evidence_graph: EvidenceGraph,
+) -> bool:
+    """Require the bridge entity to be grounded in the answer-side evidence.
+
+    This prevents false bridge jumps such as:
+        Oberoi family -> hotel company -> unrelated company paragraph -> Australia
+
+    A bridge path should not be sufficient just because some generic/surface entity
+    lets the graph reach a second sentence. The answer-side sentence or document
+    should clearly mention or be about the bridge entity.
+    """
+
+    bridge_norm = _norm_label(bridge_entity)
+    if not bridge_norm:
+        return False
+
+    sentence_node_ids = _ordered_sentence_node_ids_for_path(evidence_graph, path)
+    if len(sentence_node_ids) < 2:
+        return False
+
+    answer_side_sentence_id = sentence_node_ids[-1]
+    answer_side_node = evidence_graph.nodes.get(answer_side_sentence_id)
+    if answer_side_node is None:
+        return False
+
+    answer_side_text = _norm_label(
+        " ".join(
+            [
+                _as_text(answer_side_node.label),
+                _as_text(answer_side_node.metadata.get("sentence_text")),
+                _as_text(answer_side_node.metadata.get("resolved_text")),
+                _as_text(answer_side_node.metadata.get("doc_title")),
+            ]
+        )
+    )
+
+    if _label_contains(answer_side_text, bridge_norm):
+        return True
+
+    for edge in evidence_graph.edges:
+        if edge.edge_type != "sentence_mentions_entity":
+            continue
+        if edge.source_id != answer_side_sentence_id:
+            continue
+        target_node = evidence_graph.nodes.get(edge.target_id)
+        if target_node is None:
+            continue
+        if _labels_overlap(target_node.label, bridge_entity):
+            return True
+
+    return False
+
+
+def _ordered_sentence_node_ids_for_path(
+    evidence_graph: EvidenceGraph,
+    path: EvidencePath,
+) -> list[str]:
+    sentence_ids: list[str] = []
+
+    for node_id in path.node_ids:
+        node = evidence_graph.nodes.get(node_id)
+        if node is not None and node.node_type == "sentence":
+            _append_unique(sentence_ids, node_id)
+
+    wanted_evidence_ids = set(path.evidence_unit_ids)
+    for node_id, node in evidence_graph.nodes.items():
+        if node.node_type != "sentence":
+            continue
+        if node.metadata.get("evidence_unit_id") in wanted_evidence_ids:
+            _append_unique(sentence_ids, node_id)
+
+    return sentence_ids
+
+
+def _label_contains(container: str, target: str) -> bool:
+    container_norm = f" {_norm_label(container)} "
+    target_norm = _norm_label(target)
+    if not target_norm:
+        return False
+    return f" {target_norm} " in container_norm
+
+
+def _labels_overlap(left: str, right: str) -> bool:
+    left_norm = _norm_label(left)
+    right_norm = _norm_label(right)
+    if not left_norm or not right_norm:
+        return False
+    return left_norm == right_norm or left_norm in right_norm or right_norm in left_norm
+
+
+def _specific_bridge_entity(value: str | None) -> bool:
+    text = _as_text(value).strip(" ,.;:()[]{}")
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+
+    if normalized in _ADJECTIVAL_BRIDGE_ENTITY_BLOCKLIST:
+        return False
+
+    generic_bridge_entities = {
+        "a",
+        "an",
+        "the",
+        "company",
+        "hotel",
+        "hotel company",
+        "family",
+        "group",
+        "business",
+        "corporation",
+        "organization",
+        "organisation",
+        "person",
+        "city",
+        "country",
+        "state",
+        "location",
+        "place",
+        "head office",
+        "office",
+        "headquarters",
+        "member",
+        "members",
+        "song",
+        "album",
+        "film",
+        "movie",
+        "series",
+        "character",
+        "school",
+        "team",
+        "band",
+    }
+    if normalized in generic_bridge_entities:
+        return False
+
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if text.isupper() and len(text) >= 2:
+        return True
+
+    tokens = [token for token in text.split() if token]
+    if len(tokens) >= 2:
+        return True
+
+    return bool(text[:1].isupper() and len(text) >= 3)
+
+
+def _specific_answer(value: str | None) -> bool:
+    text = _as_text(value).strip(" ,.;:()[]{}")
+    if not text:
+        return False
+
+    normalized = _norm_label(text)
+
+    if normalized in {
         "person",
         "location",
         "date",
@@ -669,10 +1372,125 @@ def _specific_answer(value: str | None) -> bool:
         "boolean",
         "entity",
         "organization",
+        "organisation",
         "title or work",
         "title_or_work",
         "unknown",
+    }:
+        return False
+
+    if normalized in _MONTH_NAMES:
+        return False
+
+    if _looks_like_incomplete_candidate(text):
+        return False
+
+    return True
+
+
+def _looks_like_incomplete_candidate(text: str) -> bool:
+    cleaned = _as_text(text).strip(" ,.;:()[]{}")
+    normalized = _norm_label(cleaned)
+
+    if not normalized:
+        return True
+
+    incomplete_patterns = (
+        r"^(january|february|march|april|may|june|july|august|september|october|november|december)$",
+        r"^(new|old|north|south|east|west|middle|central)$",
+        r"^(united|republic|kingdom|states)$",
+        r"^(new delhi and european)$",
+    )
+    if any(re.match(pattern, normalized) for pattern in incomplete_patterns):
+        return True
+
+    dangling_endings = {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "with",
+        "after",
+        "before",
+        "from",
+        "to",
+        "for",
     }
+    last_token = normalized.split()[-1]
+    if last_token in dangling_endings:
+        return True
+
+    if cleaned.endswith("'s"):
+        return True
+
+    return False
+
+
+_MONTH_NAMES = {
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+}
+
+
+_ADJECTIVAL_BRIDGE_ENTITY_BLOCKLIST = {
+    "african",
+    "american",
+    "arab",
+    "argentine",
+    "asian",
+    "australian",
+    "austrian",
+    "belgian",
+    "brazilian",
+    "british",
+    "canadian",
+    "chinese",
+    "danish",
+    "dutch",
+    "english",
+    "european",
+    "finnish",
+    "french",
+    "german",
+    "greek",
+    "indian",
+    "irish",
+    "italian",
+    "japanese",
+    "korean",
+    "mexican",
+    "middle east",
+    "middle eastern",
+    "norwegian",
+    "polish",
+    "russian",
+    "scottish",
+    "spanish",
+    "swedish",
+    "swiss",
+    "turkish",
+    "us",
+    "u s",
+    "uk",
+    "u k",
+    "welsh",
+}
 
 
 def _as_text(value: Any) -> str:

@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.run_epsa_rag import (
     RetrievedCandidate,
     RAGDocument,
+    bound_fallback_documents_for_context,
     choose_context_for_final_answer,
     chunk_to_epsa_input,
     count_selected_context_docs,
@@ -23,6 +24,7 @@ from scripts.run_epsa_rag import (
     object_to_dict,
     selected_chunk_ids_from_epsa,
     serialize_list_for_csv,
+
 )
 
 
@@ -164,3 +166,67 @@ def test_potential_false_insufficient_flag_when_hop2_used_but_final_selection_on
         selected_chunk_ids=["h2_a"],
         hop1_chunk_ids=["h1_a"],
     ) is False
+
+
+def test_bound_fallback_documents_limits_only_when_epsa_is_insufficient() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 13)
+    ]
+
+    insufficient_result = SimpleNamespace(sufficient=False)
+    bounded = bound_fallback_documents_for_context(
+        epsa_result=insufficient_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+    )
+
+    assert [doc.chunk_id for doc in bounded] == [f"c{i}" for i in range(1, 9)]
+
+    sufficient_result = SimpleNamespace(sufficient=True)
+    unbounded = bound_fallback_documents_for_context(
+        epsa_result=sufficient_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+    )
+
+    assert [doc.chunk_id for doc in unbounded] == [f"c{i}" for i in range(1, 13)]
+
+
+def test_bound_fallback_documents_can_be_disabled_with_zero_limit() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 13)
+    ]
+
+    insufficient_result = SimpleNamespace(sufficient=False)
+    unbounded = bound_fallback_documents_for_context(
+        epsa_result=insufficient_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=0,
+    )
+
+    assert [doc.chunk_id for doc in unbounded] == [f"c{i}" for i in range(1, 13)]
+
+
+def test_choose_context_uses_prebounded_insufficient_fallback_documents() -> None:
+    epsa_result = SimpleNamespace(sufficient=False)
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 6)
+    ]
+
+    bounded_docs = bound_fallback_documents_for_context(
+        epsa_result=epsa_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=2,
+    )
+    context, source = choose_context_for_final_answer(
+        epsa_result=epsa_result,
+        fallback_documents=bounded_docs,
+    )
+
+    assert source == "epsa_insufficient_fallback_documents"
+    assert "Chunk ID: c1" in context
+    assert "Chunk ID: c2" in context
+    assert "Chunk ID: c3" not in context

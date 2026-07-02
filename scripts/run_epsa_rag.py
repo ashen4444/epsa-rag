@@ -51,6 +51,7 @@ class EPSARAGConfig:
     temperature: float = 0.0
     final_answer_max_tokens: int = 24
     max_paths: int = 10
+    insufficient_fallback_doc_limit: int = 8
 
 
 @dataclass(frozen=True)
@@ -154,9 +155,14 @@ class EPSAControlledRAGRunner:
             adaptive_stop_after_hop = "epsa_error_fallback"
 
         fallback_docs = [candidate.document for candidate in merged_candidates or hop1_candidates]
-        final_context, context_source = choose_context_for_final_answer(
+        final_fallback_docs = bound_fallback_documents_for_context(
             epsa_result=final_epsa_result,
             fallback_documents=fallback_docs,
+            insufficient_fallback_doc_limit=self.config.insufficient_fallback_doc_limit,
+        )
+        final_context, context_source = choose_context_for_final_answer(
+            epsa_result=final_epsa_result,
+            fallback_documents=final_fallback_docs,
         )
         estimated_context_tokens = estimate_token_count(final_context)
 
@@ -210,7 +216,7 @@ class EPSAControlledRAGRunner:
             "epsa_hop1_sufficient": hop1_sufficient,
             "epsa_final_sufficient": final_sufficient,
             "adaptive_stop_after_hop": adaptive_stop_after_hop,
-            "selected_context_docs": count_selected_context_docs(final_epsa_result, fallback_docs, context_source),
+            "selected_context_docs": count_selected_context_docs(final_epsa_result, final_fallback_docs,context_source),
             "selected_context_sentences": count_selected_context_sentences(final_epsa_result, context_source),
             "estimated_context_tokens": estimated_context_tokens,
             "prompt_tokens": prompt_tokens,
@@ -338,6 +344,30 @@ def merge_retrieved_candidates(
             merged.append(candidate)
 
     return merged
+
+
+def bound_fallback_documents_for_context(
+    *,
+    epsa_result: Any | None,
+    fallback_documents: Sequence[RAGDocument],
+    insufficient_fallback_doc_limit: int | None,
+) -> list[RAGDocument]:
+    """Limit fallback context only when EPSA explicitly marks evidence insufficient.
+
+    This preserves EPSA-pruned context when EPSA is sufficient, but prevents
+    insufficient fallback from becoming almost identical to the fixed 2-hop
+    baseline context.
+    """
+
+    documents = list(fallback_documents)
+
+    if not _epsa_result_explicitly_insufficient(epsa_result):
+        return documents
+
+    if insufficient_fallback_doc_limit is None or insufficient_fallback_doc_limit <= 0:
+        return documents
+
+    return documents[:insufficient_fallback_doc_limit]
 
 
 def choose_context_for_final_answer(
@@ -559,6 +589,7 @@ def main() -> None:
             temperature=args.temperature,
             final_answer_max_tokens=args.final_answer_max_tokens,
             max_paths=args.epsa_max_paths,
+            insufficient_fallback_doc_limit=args.insufficient_fallback_doc_limit,
         ),
     )
 
@@ -607,6 +638,7 @@ def main() -> None:
         "temperature": args.temperature,
         "final_answer_max_tokens": args.final_answer_max_tokens,
         "epsa_max_paths": args.epsa_max_paths,
+        "insufficient_fallback_doc_limit": args.insufficient_fallback_doc_limit,
     }
 
     summary_json_path.write_text(
@@ -639,6 +671,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hop1-top-k", type=int, default=10)
     parser.add_argument("--hop2-top-k", type=int, default=10)
     parser.add_argument("--epsa-max-paths", type=int, default=10)
+    parser.add_argument(
+        "--insufficient-fallback-doc-limit",
+        type=int,
+        default=8,
+        help=(
+            "Maximum number of retrieved documents to send when EPSA marks evidence "
+            "insufficient. Use 0 or a negative value to disable bounding."
+        ),
+    )
 
     parser.add_argument("--llm-model", default="gpt-4o-mini")
     parser.add_argument("--embedding-model", default="text-embedding-3-small")

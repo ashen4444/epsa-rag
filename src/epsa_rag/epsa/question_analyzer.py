@@ -79,6 +79,9 @@ RELATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("directed", (r"\bdirected\b", r"\bdirector\b")),
     ("written", (r"\bwritten\b", r"\bwriter\b", r"\bauthor\b", r"\bnovelist\b")),
     ("located", (r"\blocated\b", r"\bbased in\b", r"\bin\b", r"\bat\b")),
+    ("headquarters", (r"\bhead office\b", r"\bheadquartered\b", r"\bheadquarters\b")),
+    ("named", (r"\bnamed after\b", r"\bnamed for\b", r"\bnamed\b")),
+    ("nationality", (r"\bnationality\b", r"\bnational\b", r"\bcitizen\b")),
     ("founded", (r"\bfounded\b", r"\bfounder\b", r"\bestablished\b", r"\bstarted\b")),
     ("published", (r"\bpublished\b", r"\bpublisher\b")),
     ("released", (r"\breleased\b", r"\brelease date\b")),
@@ -158,18 +161,39 @@ def infer_expected_answer_type(normalized_question: str) -> AnswerType:
     """Infer the expected answer type from the question wording."""
     if normalized_question.startswith(YES_NO_STARTERS):
         return AnswerType.BOOLEAN
-    if re.search(r"\b(where|what place|which city|which country)\b", normalized_question):
-        return AnswerType.LOCATION
+
+    # Prioritize explicit answer-object wording before nested clauses.
+    # Example: "Which Oscar-nominated film ... screenwriter who wrote ..."
+    # expects a film title, not a PERSON merely because an inner clause says "who".
+    if re.search(r"\b(how many|how much|number of|population|age|height|length|distance|percentage)\b", normalized_question):
+        return AnswerType.NUMBER
     if re.search(r"\b(when|what year|which year|what date|which date)\b", normalized_question):
         return AnswerType.DATE
-    if re.search(r"\b(how many|how much|number of|population|age|height|length|distance)\b", normalized_question):
-        return AnswerType.NUMBER
-    if re.search(r"\b(who|whom|whose)\b", normalized_question):
-        return AnswerType.PERSON
-    if any(re.search(rf"\bwhich {re.escape(term)}\b", normalized_question) for term in TITLE_OR_WORK_TERMS):
+    if re.search(
+        r"\b(which|what)\b[^?]{0,80}\b"
+        r"(film|movie|book|novel|album|song|magazine|series|television series|tv series|"
+        r"play|poem|episode|game)\b",
+        normalized_question,
+    ):
         return AnswerType.TITLE_OR_WORK
-    if re.search(r"\b(which company|which organization|which university|which team|which band)\b", normalized_question):
+    if re.search(
+        r"\b(which|what)\b[^?]{0,80}\b"
+        r"(company|organization|university|team|band|network|political party|party|"
+        r"publisher|publication)\b",
+        normalized_question,
+    ):
         return AnswerType.ORGANIZATION
+    if re.search(
+        r"\b(where|what place|which city|what city|which country|what country|"
+        r"which state|what state|which county|what county)\b",
+        normalized_question,
+    ):
+        return AnswerType.LOCATION
+    if re.search(
+        r"\b(who|whom|whose|what is (?:his|her|their) name|which other member|which member|which person)\b",
+        normalized_question,
+    ):
+        return AnswerType.PERSON
     if normalized_question.startswith("which ") or normalized_question.startswith("what "):
         return AnswerType.ENTITY
     return AnswerType.UNKNOWN
@@ -205,12 +229,13 @@ def infer_question_type(normalized_question: str, expected_answer_type: AnswerTy
     if any(marker in padded for marker in comparison_markers):
         return QuestionType.COMPARISON
 
-    # HotPotQA often phrases binary comparison as:
+    # HotPotQA often phrases binary comparison/choice as:
     #   "Which X ... A or B?"
     #   "Who ... David Lee Roth or Cia Berg?"
-    # Treat these as comparison/choice questions instead of single-hop factoids.
+    #   "Is A or B the largest ...?"
+    # Treat these as comparison/choice questions instead of factoid/yes-no.
     if (
-        re.search(r"\b(which|who|what)\b", normalized_question)
+        re.search(r"\b(which|who|what|is|are|was|were|do|does|did|has|have|had)\b", normalized_question)
         and " or " in padded
         and normalized_question.endswith("?")
     ):
@@ -218,6 +243,9 @@ def infer_question_type(normalized_question: str, expected_answer_type: AnswerTy
 
     if expected_answer_type == AnswerType.BOOLEAN:
         return QuestionType.YES_NO
+
+    if _has_nested_bridge_structure(normalized_question):
+        return QuestionType.BRIDGE
 
     bridge_patterns = (
         r"\b(where|when|who|what|which)\b.+\b(the|a|an)\b.+\bof\b.+",
@@ -229,6 +257,23 @@ def infer_question_type(normalized_question: str, expected_answer_type: AnswerTy
         return QuestionType.BRIDGE
 
     return QuestionType.FACTOID
+
+
+
+def _has_nested_bridge_structure(normalized_question: str) -> bool:
+    """Return True when the wording asks through an intermediate entity/relation."""
+    nested_patterns = (
+        r"\b[a-z0-9][a-z0-9 .&'-]*'s\s+(wife|husband|spouse|father|mother|son|daughter)\b",
+        r"\bwhere\s+the\s+[^?]+\bwas\s+staged\b",
+        r"\bwhich\s+narrator\s+of\b",
+        r"\bwhich\s+album\b[^?]*\bfrom\b",
+        r"\bwhich\s+[^?]{0,80}\b(film|movie|series|album|song|game)\b[^?]*\b(written|directed|recorded|created|produced|staged|based)\b",
+        r"\b(the|a|an)\s+[^?]{0,100}\b(who|which|that)\b[^?]{0,120}\b",
+        r"\b(team|band|company|school|screenwriter|vocalist|narrator|founder|producer|director|member|members|lead singer|school bus driver)\b[^?]{0,80}\b(that|who|which|of|for|in|by)\b",
+        r"\b(contributed\b[^?]*\bassociated with|associated with\b[^?]*\bcontributed)\b",
+    )
+    return any(re.search(pattern, normalized_question) for pattern in nested_patterns)
+
 
 
 
