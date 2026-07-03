@@ -13,19 +13,24 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.run_epsa_rag import (
     RetrievedCandidate,
     RAGDocument,
+    best_gold_title_rank,
     bound_fallback_documents_for_context,
+    build_gold_title_diagnostics,
     choose_context_for_final_answer,
     chunk_to_epsa_input,
     count_selected_context_docs,
     count_selected_context_sentences,
+    documents_for_selected_chunk_ids,
+    gold_title_coverage_status,
     is_potential_false_insufficient,
     is_potential_false_sufficient,
+    matching_gold_titles,
     merge_retrieved_candidates,
+    normalize_title_for_matching,
     object_to_dict,
     resolve_insufficient_fallback_doc_limit,
     selected_chunk_ids_from_epsa,
     serialize_list_for_csv,
-
 )
 
 
@@ -366,4 +371,155 @@ def test_adaptive_fallback_does_not_bound_epsa_sufficient_cases() -> None:
             insufficient_fallback_strategy="adaptive",
         )
         is None
+    )
+
+
+
+def test_normalize_title_for_matching_is_case_and_whitespace_insensitive() -> None:
+    assert normalize_title_for_matching("  The   Matrix  ") == normalize_title_for_matching("the matrix")
+
+
+def test_matching_gold_titles_detects_hop1_documents() -> None:
+    hop1_docs = [_candidate("h1", title="  Marie   Curie ").document]
+
+    assert matching_gold_titles(hop1_docs, ["marie curie", "Radium"]) == ["marie curie"]
+
+
+def test_gold_title_diagnostics_detects_hop2_documents() -> None:
+    diagnostics = build_gold_title_diagnostics(
+        gold_supporting_titles=["Marie Curie", "Radium"],
+        hop1_candidates=[_candidate("h1", title="Marie Curie")],
+        hop2_candidates=[_candidate("h2", title="Radium")],
+        merged_candidates=[_candidate("h1", title="Marie Curie"), _candidate("h2", title="Radium")],
+        selected_chunk_ids=[],
+        final_context_documents=[],
+        context_source="epsa_pruned_context",
+    )
+
+    assert diagnostics["gold_titles_in_hop2_count"] == 1
+    assert diagnostics["gold_titles_in_hop2"] == '["Radium"]'
+
+
+def test_gold_title_diagnostics_detects_merged_documents() -> None:
+    diagnostics = build_gold_title_diagnostics(
+        gold_supporting_titles=["Marie Curie", "Radium"],
+        hop1_candidates=[_candidate("h1", title="Marie Curie")],
+        hop2_candidates=[_candidate("h2", title="Radium")],
+        merged_candidates=[_candidate("h1", title="Marie Curie"), _candidate("h2", title="Radium")],
+        selected_chunk_ids=[],
+        final_context_documents=[],
+        context_source="epsa_pruned_context",
+    )
+
+    assert diagnostics["gold_titles_in_merged_count"] == 2
+    assert diagnostics["gold_titles_missing_from_merged_count"] == 0
+
+
+def test_selected_epsa_chunk_ids_map_back_to_selected_document_titles() -> None:
+    merged_candidates = [
+        _candidate("c1", title="Distractor"),
+        _candidate("c2", title="Christopher Nolan"),
+    ]
+
+    selected_documents = documents_for_selected_chunk_ids(merged_candidates, ["c2"])
+    diagnostics = build_gold_title_diagnostics(
+        gold_supporting_titles=["Christopher Nolan"],
+        hop1_candidates=merged_candidates,
+        hop2_candidates=[],
+        merged_candidates=merged_candidates,
+        selected_chunk_ids=["c2"],
+        final_context_documents=selected_documents,
+        context_source="epsa_pruned_context",
+    )
+
+    assert [document.title for document in selected_documents] == ["Christopher Nolan"]
+    assert diagnostics["gold_titles_selected_by_epsa_count"] == 1
+    assert diagnostics["gold_titles_selected_by_epsa"] == '["Christopher Nolan"]'
+
+
+def test_best_gold_title_rank_is_computed_from_merged_candidate_order() -> None:
+    candidates = [
+        _candidate("c1", title="Distractor"),
+        _candidate("c2", title="Radium"),
+        _candidate("c3", title="Marie Curie"),
+    ]
+
+    assert best_gold_title_rank(candidates, ["Marie Curie", "Radium"]) == 2
+
+
+def test_gold_title_coverage_status_returns_gold_not_retrieved() -> None:
+    assert (
+        gold_title_coverage_status(
+            gold_supporting_title_count=2,
+            gold_titles_in_merged_count=0,
+            gold_titles_selected_by_epsa_count=0,
+            gold_titles_in_final_context_count=0,
+            context_source="epsa_pruned_context",
+        )
+        == "gold_not_retrieved"
+    )
+
+
+def test_gold_title_coverage_status_returns_partial_gold_retrieved() -> None:
+    assert (
+        gold_title_coverage_status(
+            gold_supporting_title_count=2,
+            gold_titles_in_merged_count=1,
+            gold_titles_selected_by_epsa_count=0,
+            gold_titles_in_final_context_count=0,
+            context_source="epsa_pruned_context",
+        )
+        == "partial_gold_retrieved"
+    )
+
+
+def test_gold_title_coverage_status_returns_all_gold_retrieved_not_selected() -> None:
+    assert (
+        gold_title_coverage_status(
+            gold_supporting_title_count=2,
+            gold_titles_in_merged_count=2,
+            gold_titles_selected_by_epsa_count=0,
+            gold_titles_in_final_context_count=0,
+            context_source="epsa_pruned_context",
+        )
+        == "all_gold_retrieved_not_selected"
+    )
+
+
+def test_gold_title_coverage_status_returns_partial_gold_selected() -> None:
+    assert (
+        gold_title_coverage_status(
+            gold_supporting_title_count=2,
+            gold_titles_in_merged_count=2,
+            gold_titles_selected_by_epsa_count=1,
+            gold_titles_in_final_context_count=1,
+            context_source="epsa_pruned_context",
+        )
+        == "partial_gold_selected"
+    )
+
+
+def test_gold_title_coverage_status_returns_all_gold_selected() -> None:
+    assert (
+        gold_title_coverage_status(
+            gold_supporting_title_count=2,
+            gold_titles_in_merged_count=2,
+            gold_titles_selected_by_epsa_count=2,
+            gold_titles_in_final_context_count=2,
+            context_source="epsa_pruned_context",
+        )
+        == "all_gold_selected"
+    )
+
+
+def test_gold_title_coverage_status_returns_fallback_context_contains_gold() -> None:
+    assert (
+        gold_title_coverage_status(
+            gold_supporting_title_count=2,
+            gold_titles_in_merged_count=2,
+            gold_titles_selected_by_epsa_count=0,
+            gold_titles_in_final_context_count=2,
+            context_source="epsa_insufficient_fallback_documents",
+        )
+        == "fallback_context_contains_gold"
     )

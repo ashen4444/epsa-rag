@@ -96,7 +96,6 @@ class EPSAControlledRAGRunner:
         gold_answer: str | None = None,
         gold_supporting_titles: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        _ = gold_supporting_titles
         started_at = time.perf_counter()
 
         try:
@@ -113,6 +112,7 @@ class EPSAControlledRAGRunner:
                 gold_answer=gold_answer,
                 latency_ms=elapsed_ms(started_at),
                 retrieval_error=f"hop1_retrieval_error: {exc}",
+                gold_supporting_titles=gold_supporting_titles,
             )
 
         hop1_epsa_result = None
@@ -238,6 +238,21 @@ class EPSAControlledRAGRunner:
         hop1_chunk_ids = [candidate.document.chunk_id for candidate in hop1_candidates]
         hop2_chunk_ids = [candidate.document.chunk_id for candidate in hop2_candidates]
         merged_chunk_ids = [candidate.document.chunk_id for candidate in merged_candidates]
+        final_context_documents = documents_for_final_context_diagnostics(
+            context_source=context_source,
+            final_fallback_documents=final_fallback_docs,
+            merged_candidates=merged_candidates,
+            selected_chunk_ids=selected_chunk_ids,
+        )
+        gold_title_diagnostics = build_gold_title_diagnostics(
+            gold_supporting_titles=gold_supporting_titles or [],
+            hop1_candidates=hop1_candidates,
+            hop2_candidates=hop2_candidates,
+            merged_candidates=merged_candidates,
+            selected_chunk_ids=selected_chunk_ids,
+            final_context_documents=final_context_documents,
+            context_source=context_source,
+        )
 
         hop1_sufficient = bool(hop1_epsa_result.sufficient) if hop1_epsa_result is not None else False
         final_sufficient = bool(final_epsa_result.sufficient) if final_epsa_result is not None else False
@@ -287,6 +302,7 @@ class EPSAControlledRAGRunner:
             "hop1_retrieved_chunk_ids": serialize_list_for_csv(hop1_chunk_ids),
             "hop2_retrieved_chunk_ids": serialize_list_for_csv(hop2_chunk_ids),
             "merged_retrieved_chunk_ids": serialize_list_for_csv(merged_chunk_ids),
+            **gold_title_diagnostics,
             "potential_false_sufficient_candidate": is_potential_false_sufficient(
                 epsa_sufficient=final_sufficient,
                 exact_match=exact_match,
@@ -394,6 +410,203 @@ def merge_retrieved_candidates(
             merged.append(candidate)
 
     return merged
+
+
+
+def normalize_title_for_matching(title: Any) -> str:
+    """Normalize document titles for deterministic gold-title matching."""
+
+    return " ".join(str(title or "").casefold().strip().split())
+
+
+def document_title(document: RAGDocument) -> str:
+    """Return a stable title string from a RAG document."""
+
+    return str(getattr(document, "title", "") or "")
+
+
+def candidate_document_title(candidate: RetrievedCandidate) -> str:
+    title = document_title(candidate.document)
+    if title:
+        return title
+
+    return str(
+        candidate.epsa_chunk.get("doc_title")
+        or candidate.epsa_chunk.get("title")
+        or ""
+    )
+
+
+def unique_titles_for_matching(titles: Sequence[str] | None) -> list[str]:
+    return unique_preserve_order(str(title) for title in titles or [] if title is not None)
+
+
+def matching_gold_titles(
+    documents: Sequence[RAGDocument],
+    gold_titles: Sequence[str] | None,
+) -> list[str]:
+    """Return gold titles whose normalized title appears in the given documents."""
+
+    normalized_document_titles = {
+        normalize_title_for_matching(document_title(document))
+        for document in documents
+    }
+    normalized_document_titles.discard("")
+
+    matches: list[str] = []
+    for gold_title in unique_titles_for_matching(gold_titles):
+        if normalize_title_for_matching(gold_title) in normalized_document_titles:
+            matches.append(gold_title)
+
+    return matches
+
+
+def candidate_documents(candidates: Sequence[RetrievedCandidate]) -> list[RAGDocument]:
+    return [candidate.document for candidate in candidates]
+
+
+def documents_for_selected_chunk_ids(
+    candidates: Sequence[RetrievedCandidate],
+    selected_chunk_ids: Sequence[str],
+) -> list[RAGDocument]:
+    selected = {str(chunk_id) for chunk_id in selected_chunk_ids if chunk_id}
+    if not selected:
+        return []
+
+    documents: list[RAGDocument] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        chunk_id = str(candidate.document.chunk_id)
+        if chunk_id not in selected or chunk_id in seen:
+            continue
+        documents.append(candidate.document)
+        seen.add(chunk_id)
+
+    return documents
+
+
+def documents_for_final_context_diagnostics(
+    *,
+    context_source: str,
+    final_fallback_documents: Sequence[RAGDocument],
+    merged_candidates: Sequence[RetrievedCandidate],
+    selected_chunk_ids: Sequence[str],
+) -> list[RAGDocument]:
+    if context_source == "epsa_pruned_context":
+        return documents_for_selected_chunk_ids(merged_candidates, selected_chunk_ids)
+
+    if context_source in {"epsa_insufficient_fallback_documents", "fallback_documents"}:
+        return list(final_fallback_documents)
+
+    return []
+
+
+def best_gold_title_rank(
+    candidates: Sequence[RetrievedCandidate],
+    gold_titles: Sequence[str] | None,
+) -> int | None:
+    """Return the best 1-based candidate-pool rank containing any gold title."""
+
+    normalized_gold_titles = {
+        normalize_title_for_matching(title)
+        for title in unique_titles_for_matching(gold_titles)
+    }
+    normalized_gold_titles.discard("")
+
+    if not normalized_gold_titles:
+        return None
+
+    for fallback_rank, candidate in enumerate(candidates, start=1):
+        if normalize_title_for_matching(candidate_document_title(candidate)) in normalized_gold_titles:
+            return fallback_rank
+
+    return None
+
+
+def gold_title_coverage_status(
+    *,
+    gold_supporting_title_count: int,
+    gold_titles_in_merged_count: int,
+    gold_titles_selected_by_epsa_count: int,
+    gold_titles_in_final_context_count: int,
+    context_source: str,
+) -> str:
+    if gold_supporting_title_count <= 0:
+        return "no_gold_titles_available"
+
+    if gold_titles_in_merged_count <= 0:
+        return "gold_not_retrieved"
+
+    if (
+        context_source == "epsa_insufficient_fallback_documents"
+        and gold_titles_in_final_context_count > gold_titles_selected_by_epsa_count
+    ):
+        return "fallback_context_contains_gold"
+
+    if gold_titles_selected_by_epsa_count >= gold_supporting_title_count:
+        return "all_gold_selected"
+
+    if gold_titles_selected_by_epsa_count > 0:
+        return "partial_gold_selected"
+
+    if gold_titles_in_merged_count >= gold_supporting_title_count:
+        return "all_gold_retrieved_not_selected"
+
+    if gold_titles_in_merged_count > 0:
+        return "partial_gold_retrieved"
+
+    return "unknown"
+
+
+def build_gold_title_diagnostics(
+    *,
+    gold_supporting_titles: Sequence[str] | None,
+    hop1_candidates: Sequence[RetrievedCandidate],
+    hop2_candidates: Sequence[RetrievedCandidate],
+    merged_candidates: Sequence[RetrievedCandidate],
+    selected_chunk_ids: Sequence[str],
+    final_context_documents: Sequence[RAGDocument],
+    context_source: str,
+) -> dict[str, Any]:
+    gold_titles = unique_titles_for_matching(gold_supporting_titles)
+    hop1_gold_titles = matching_gold_titles(candidate_documents(hop1_candidates), gold_titles)
+    hop2_gold_titles = matching_gold_titles(candidate_documents(hop2_candidates), gold_titles)
+    merged_gold_titles = matching_gold_titles(candidate_documents(merged_candidates), gold_titles)
+    selected_documents = documents_for_selected_chunk_ids(merged_candidates, selected_chunk_ids)
+    selected_gold_titles = matching_gold_titles(selected_documents, gold_titles)
+    final_context_gold_titles = matching_gold_titles(final_context_documents, gold_titles)
+    missing_from_merged = [
+        title
+        for title in gold_titles
+        if normalize_title_for_matching(title)
+        not in {normalize_title_for_matching(value) for value in merged_gold_titles}
+    ]
+
+    status = gold_title_coverage_status(
+        gold_supporting_title_count=len(gold_titles),
+        gold_titles_in_merged_count=len(merged_gold_titles),
+        gold_titles_selected_by_epsa_count=len(selected_gold_titles),
+        gold_titles_in_final_context_count=len(final_context_gold_titles),
+        context_source=context_source,
+    )
+
+    return {
+        "gold_supporting_title_count": len(gold_titles),
+        "gold_titles_in_hop1_count": len(hop1_gold_titles),
+        "gold_titles_in_hop2_count": len(hop2_gold_titles),
+        "gold_titles_in_merged_count": len(merged_gold_titles),
+        "gold_titles_selected_by_epsa_count": len(selected_gold_titles),
+        "gold_titles_in_final_context_count": len(final_context_gold_titles),
+        "gold_titles_missing_from_merged_count": len(missing_from_merged),
+        "gold_titles_in_hop1": serialize_list_for_csv(hop1_gold_titles),
+        "gold_titles_in_hop2": serialize_list_for_csv(hop2_gold_titles),
+        "gold_titles_in_merged": serialize_list_for_csv(merged_gold_titles),
+        "gold_titles_selected_by_epsa": serialize_list_for_csv(selected_gold_titles),
+        "gold_titles_in_final_context": serialize_list_for_csv(final_context_gold_titles),
+        "gold_titles_missing_from_merged": serialize_list_for_csv(missing_from_merged),
+        "gold_title_best_rank": best_gold_title_rank(merged_candidates, gold_titles),
+        "gold_title_coverage_status": status,
+    }
 
 
 def bound_fallback_documents_for_context(
@@ -635,7 +848,18 @@ def build_error_record(
     retrieval_error: str | None = None,
     epsa_error: str | None = None,
     final_answer_error: str | None = None,
+    gold_supporting_titles: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    gold_title_diagnostics = build_gold_title_diagnostics(
+        gold_supporting_titles=gold_supporting_titles or [],
+        hop1_candidates=[],
+        hop2_candidates=[],
+        merged_candidates=[],
+        selected_chunk_ids=[],
+        final_context_documents=[],
+        context_source="none",
+    )
+
     return {
         "question_id": question_id,
         "question": question,
@@ -675,6 +899,7 @@ def build_error_record(
         "hop1_retrieved_chunk_ids": serialize_list_for_csv([]),
         "hop2_retrieved_chunk_ids": serialize_list_for_csv([]),
         "merged_retrieved_chunk_ids": serialize_list_for_csv([]),
+        **gold_title_diagnostics,
         "potential_false_sufficient_candidate": False,
         "potential_false_insufficient_candidate": False,
         "retrieval_failed": bool(retrieval_error),
