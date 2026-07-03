@@ -95,6 +95,39 @@ def summarize_epsa_rag_records(
     potential_false_sufficient_count = _count_truthy(records, "potential_false_sufficient_candidate")
     potential_false_insufficient_count = _count_truthy(records, "potential_false_insufficient_candidate")
 
+    gold_titles_available_count = _count_records(
+        records,
+        lambda record: _record_int(record, "gold_supporting_title_count") > 0,
+    )
+    gold_titles_all_retrieved_count = _count_records(
+        records,
+        lambda record: _has_all_gold_titles(record, "gold_titles_in_merged_count"),
+    )
+    gold_titles_partial_retrieved_count = _count_records(
+        records,
+        lambda record: _has_partial_gold_titles(record, "gold_titles_in_merged_count"),
+    )
+    gold_titles_not_retrieved_count = _count_records(
+        records,
+        lambda record: _has_no_gold_titles(record, "gold_titles_in_merged_count"),
+    )
+    gold_titles_all_selected_count = _count_records(
+        records,
+        lambda record: _has_all_gold_titles(record, "gold_titles_selected_by_epsa_count"),
+    )
+    gold_titles_partial_selected_count = _count_records(
+        records,
+        lambda record: _has_partial_gold_titles(record, "gold_titles_selected_by_epsa_count"),
+    )
+    gold_titles_not_selected_count = _count_records(
+        records,
+        lambda record: _has_no_gold_titles(record, "gold_titles_selected_by_epsa_count"),
+    )
+    gold_titles_all_in_final_context_count = _count_records(
+        records,
+        lambda record: _has_all_gold_titles(record, "gold_titles_in_final_context_count"),
+    )
+
     summary: dict[str, Any] = {
         "num_records": total,
         "exact_match": safe_mean([record.get("exact_match") for record in records]),
@@ -121,6 +154,90 @@ def summarize_epsa_rag_records(
         "potential_false_sufficient_rate": safe_rate(potential_false_sufficient_count, total),
         "potential_false_insufficient_count": potential_false_insufficient_count,
         "potential_false_insufficient_rate": safe_rate(potential_false_insufficient_count, total),
+        "gold_titles_available_count": gold_titles_available_count,
+        "gold_titles_available_rate": safe_rate(gold_titles_available_count, total),
+        "gold_titles_all_retrieved_count": gold_titles_all_retrieved_count,
+        "gold_titles_all_retrieved_rate": safe_rate(gold_titles_all_retrieved_count, total),
+        "gold_titles_partial_retrieved_count": gold_titles_partial_retrieved_count,
+        "gold_titles_partial_retrieved_rate": safe_rate(gold_titles_partial_retrieved_count, total),
+        "gold_titles_not_retrieved_count": gold_titles_not_retrieved_count,
+        "gold_titles_not_retrieved_rate": safe_rate(gold_titles_not_retrieved_count, total),
+        "gold_titles_all_selected_count": gold_titles_all_selected_count,
+        "gold_titles_all_selected_rate": safe_rate(gold_titles_all_selected_count, total),
+        "gold_titles_partial_selected_count": gold_titles_partial_selected_count,
+        "gold_titles_partial_selected_rate": safe_rate(gold_titles_partial_selected_count, total),
+        "gold_titles_not_selected_count": gold_titles_not_selected_count,
+        "gold_titles_not_selected_rate": safe_rate(gold_titles_not_selected_count, total),
+        "gold_titles_all_in_final_context_count": gold_titles_all_in_final_context_count,
+        "gold_titles_all_in_final_context_rate": safe_rate(
+            gold_titles_all_in_final_context_count,
+            total,
+        ),
+        "coverage_status_gold_not_retrieved_count": _count_coverage_status(
+            records,
+            "gold_not_retrieved",
+        ),
+        "coverage_status_partial_gold_retrieved_count": _count_coverage_status(
+            records,
+            "partial_gold_retrieved",
+        ),
+        "coverage_status_all_gold_retrieved_not_selected_count": _count_coverage_status(
+            records,
+            "all_gold_retrieved_not_selected",
+        ),
+        "coverage_status_partial_gold_selected_count": _count_coverage_status(
+            records,
+            "partial_gold_selected",
+        ),
+        "coverage_status_all_gold_selected_count": _count_coverage_status(
+            records,
+            "all_gold_selected",
+        ),
+        "coverage_status_fallback_context_contains_gold_count": _count_coverage_status(
+            records,
+            "fallback_context_contains_gold",
+        ),
+        "false_sufficient_gold_titles_all_retrieved_count": _count_records(
+            records,
+            lambda record: _as_bool(record.get("potential_false_sufficient_candidate"))
+            and _has_all_gold_titles(record, "gold_titles_in_merged_count"),
+        ),
+        "false_sufficient_gold_titles_not_fully_selected_count": _count_records(
+            records,
+            lambda record: _as_bool(record.get("potential_false_sufficient_candidate"))
+            and _record_int(record, "gold_titles_selected_by_epsa_count")
+            < _record_int(record, "gold_supporting_title_count"),
+        ),
+        "false_sufficient_gold_not_retrieved_count": _count_coverage_status(
+            records,
+            "gold_not_retrieved",
+            only_potential_false_sufficient=True,
+        ),
+        "false_sufficient_partial_gold_retrieved_count": _count_coverage_status(
+            records,
+            "partial_gold_retrieved",
+            only_potential_false_sufficient=True,
+        ),
+        "false_sufficient_all_gold_retrieved_not_selected_count": _count_coverage_status(
+            records,
+            "all_gold_retrieved_not_selected",
+            only_potential_false_sufficient=True,
+        ),
+        "false_sufficient_partial_gold_selected_count": _count_coverage_status(
+            records,
+            "partial_gold_selected",
+            only_potential_false_sufficient=True,
+        ),
+        "false_sufficient_all_gold_selected_count": _count_coverage_status(
+            records,
+            "all_gold_selected",
+            only_potential_false_sufficient=True,
+        ),
+        "false_sufficient_fallback_context_contains_gold_count": _count_coverage_status(
+            records,
+            "fallback_context_contains_gold",
+            only_potential_false_sufficient=True,
+        ),
         "retrieval_failures": _count_truthy(records, "retrieval_failed"),
         "final_answer_generation_failures": _count_truthy(
             records,
@@ -164,6 +281,53 @@ def _count_truthy(records: Sequence[Mapping[str, Any]], field_name: str) -> int:
 
 def _count_value(records: Sequence[Mapping[str, Any]], field_name: str, expected_value: str) -> int:
     return sum(1 for record in records if str(record.get(field_name) or "") == expected_value)
+
+
+def _count_records(records: Sequence[Mapping[str, Any]], predicate: Any) -> int:
+    return sum(1 for record in records if predicate(record))
+
+
+def _count_coverage_status(
+    records: Sequence[Mapping[str, Any]],
+    expected_status: str,
+    *,
+    only_potential_false_sufficient: bool = False,
+) -> int:
+    return _count_records(
+        records,
+        lambda record: str(record.get("gold_title_coverage_status") or "") == expected_status
+        and (
+            not only_potential_false_sufficient
+            or _as_bool(record.get("potential_false_sufficient_candidate"))
+        ),
+    )
+
+
+def _has_all_gold_titles(record: Mapping[str, Any], field_name: str) -> bool:
+    gold_count = _record_int(record, "gold_supporting_title_count")
+    return gold_count > 0 and _record_int(record, field_name) >= gold_count
+
+
+def _has_partial_gold_titles(record: Mapping[str, Any], field_name: str) -> bool:
+    gold_count = _record_int(record, "gold_supporting_title_count")
+    value = _record_int(record, field_name)
+    return gold_count > 0 and 0 < value < gold_count
+
+
+def _has_no_gold_titles(record: Mapping[str, Any], field_name: str) -> bool:
+    gold_count = _record_int(record, "gold_supporting_title_count")
+    return gold_count > 0 and _record_int(record, field_name) <= 0
+
+
+def _record_int(record: Mapping[str, Any], field_name: str) -> int:
+    value = record.get(field_name)
+
+    try:
+        if value is None or value == "":
+            return 0
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _as_bool(value: Any) -> bool:
