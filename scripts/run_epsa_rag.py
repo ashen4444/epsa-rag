@@ -51,7 +51,13 @@ class EPSARAGConfig:
     temperature: float = 0.0
     final_answer_max_tokens: int = 24
     max_paths: int = 10
+    insufficient_fallback_strategy: str = "fixed"
     insufficient_fallback_doc_limit: int = 8
+    adaptive_fallback_high_confidence_threshold: float = 0.48
+    adaptive_fallback_medium_confidence_threshold: float = 0.42
+    adaptive_fallback_high_confidence_limit: int = 8
+    adaptive_fallback_medium_confidence_limit: int = 10
+    adaptive_fallback_low_confidence_limit: int = 12
 
 
 @dataclass(frozen=True)
@@ -155,10 +161,46 @@ class EPSAControlledRAGRunner:
             adaptive_stop_after_hop = "epsa_error_fallback"
 
         fallback_docs = [candidate.document for candidate in merged_candidates or hop1_candidates]
+        resolved_fallback_doc_limit = resolve_insufficient_fallback_doc_limit(
+            epsa_result=final_epsa_result,
+            insufficient_fallback_strategy=self.config.insufficient_fallback_strategy,
+            insufficient_fallback_doc_limit=self.config.insufficient_fallback_doc_limit,
+            adaptive_fallback_high_confidence_threshold=(
+                self.config.adaptive_fallback_high_confidence_threshold
+            ),
+            adaptive_fallback_medium_confidence_threshold=(
+                self.config.adaptive_fallback_medium_confidence_threshold
+            ),
+            adaptive_fallback_high_confidence_limit=(
+                self.config.adaptive_fallback_high_confidence_limit
+            ),
+            adaptive_fallback_medium_confidence_limit=(
+                self.config.adaptive_fallback_medium_confidence_limit
+            ),
+            adaptive_fallback_low_confidence_limit=(
+                self.config.adaptive_fallback_low_confidence_limit
+            ),
+        )
         final_fallback_docs = bound_fallback_documents_for_context(
             epsa_result=final_epsa_result,
             fallback_documents=fallback_docs,
             insufficient_fallback_doc_limit=self.config.insufficient_fallback_doc_limit,
+            insufficient_fallback_strategy=self.config.insufficient_fallback_strategy,
+            adaptive_fallback_high_confidence_threshold=(
+                self.config.adaptive_fallback_high_confidence_threshold
+            ),
+            adaptive_fallback_medium_confidence_threshold=(
+                self.config.adaptive_fallback_medium_confidence_threshold
+            ),
+            adaptive_fallback_high_confidence_limit=(
+                self.config.adaptive_fallback_high_confidence_limit
+            ),
+            adaptive_fallback_medium_confidence_limit=(
+                self.config.adaptive_fallback_medium_confidence_limit
+            ),
+            adaptive_fallback_low_confidence_limit=(
+                self.config.adaptive_fallback_low_confidence_limit
+            ),
         )
         final_context, context_source = choose_context_for_final_answer(
             epsa_result=final_epsa_result,
@@ -216,7 +258,15 @@ class EPSAControlledRAGRunner:
             "epsa_hop1_sufficient": hop1_sufficient,
             "epsa_final_sufficient": final_sufficient,
             "adaptive_stop_after_hop": adaptive_stop_after_hop,
-            "selected_context_docs": count_selected_context_docs(final_epsa_result, final_fallback_docs,context_source),
+            "insufficient_fallback_strategy": normalize_insufficient_fallback_strategy(
+                self.config.insufficient_fallback_strategy
+            ),
+            "resolved_insufficient_fallback_doc_limit": resolved_fallback_doc_limit,
+            "selected_context_docs": count_selected_context_docs(
+                final_epsa_result,
+                final_fallback_docs,
+                context_source,
+            ),
             "selected_context_sentences": count_selected_context_sentences(final_epsa_result, context_source),
             "estimated_context_tokens": estimated_context_tokens,
             "prompt_tokens": prompt_tokens,
@@ -351,23 +401,100 @@ def bound_fallback_documents_for_context(
     epsa_result: Any | None,
     fallback_documents: Sequence[RAGDocument],
     insufficient_fallback_doc_limit: int | None,
+    insufficient_fallback_strategy: str = "fixed",
+    adaptive_fallback_high_confidence_threshold: float = 0.48,
+    adaptive_fallback_medium_confidence_threshold: float = 0.42,
+    adaptive_fallback_high_confidence_limit: int = 8,
+    adaptive_fallback_medium_confidence_limit: int = 10,
+    adaptive_fallback_low_confidence_limit: int = 12,
 ) -> list[RAGDocument]:
     """Limit fallback context only when EPSA explicitly marks evidence insufficient.
 
-    This preserves EPSA-pruned context when EPSA is sufficient, but prevents
-    insufficient fallback from becoming almost identical to the fixed 2-hop
-    baseline context.
+    Fixed strategy preserves the Chat 17 bounded fallback behavior. Adaptive
+    strategy keeps the conservative sufficient/insufficient decision unchanged,
+    but varies the insufficient fallback size by deterministic EPSA confidence.
     """
 
     documents = list(fallback_documents)
+    doc_limit = resolve_insufficient_fallback_doc_limit(
+        epsa_result=epsa_result,
+        insufficient_fallback_strategy=insufficient_fallback_strategy,
+        insufficient_fallback_doc_limit=insufficient_fallback_doc_limit,
+        adaptive_fallback_high_confidence_threshold=adaptive_fallback_high_confidence_threshold,
+        adaptive_fallback_medium_confidence_threshold=adaptive_fallback_medium_confidence_threshold,
+        adaptive_fallback_high_confidence_limit=adaptive_fallback_high_confidence_limit,
+        adaptive_fallback_medium_confidence_limit=adaptive_fallback_medium_confidence_limit,
+        adaptive_fallback_low_confidence_limit=adaptive_fallback_low_confidence_limit,
+    )
+
+    if doc_limit is None or doc_limit <= 0:
+        return documents
+
+    return documents[:doc_limit]
+
+
+def resolve_insufficient_fallback_doc_limit(
+    *,
+    epsa_result: Any | None,
+    insufficient_fallback_strategy: str = "fixed",
+    insufficient_fallback_doc_limit: int | None = 8,
+    adaptive_fallback_high_confidence_threshold: float = 0.48,
+    adaptive_fallback_medium_confidence_threshold: float = 0.42,
+    adaptive_fallback_high_confidence_limit: int = 8,
+    adaptive_fallback_medium_confidence_limit: int = 10,
+    adaptive_fallback_low_confidence_limit: int = 12,
+) -> int | None:
+    """Resolve the fallback document limit for the current EPSA result.
+
+    Returns None when fallback bounding should not apply. That is intentional
+    for EPSA-sufficient results, because sufficient cases must use EPSA-pruned
+    context rather than an insufficient-fallback budget.
+    """
 
     if not _epsa_result_explicitly_insufficient(epsa_result):
-        return documents
+        return None
 
-    if insufficient_fallback_doc_limit is None or insufficient_fallback_doc_limit <= 0:
-        return documents
+    strategy = normalize_insufficient_fallback_strategy(insufficient_fallback_strategy)
 
-    return documents[:insufficient_fallback_doc_limit]
+    if strategy == "fixed":
+        return insufficient_fallback_doc_limit
+
+    confidence = sufficiency_confidence_from_epsa(epsa_result)
+
+    if confidence >= adaptive_fallback_high_confidence_threshold:
+        return adaptive_fallback_high_confidence_limit
+    if confidence >= adaptive_fallback_medium_confidence_threshold:
+        return adaptive_fallback_medium_confidence_limit
+    return adaptive_fallback_low_confidence_limit
+
+
+def normalize_insufficient_fallback_strategy(value: str | None) -> str:
+    strategy = (value or "fixed").strip().casefold()
+    if strategy not in {"fixed", "adaptive"}:
+        raise ValueError(
+            "insufficient_fallback_strategy must be either 'fixed' or 'adaptive'."
+        )
+    return strategy
+
+
+def sufficiency_confidence_from_epsa(epsa_result: Any | None) -> float:
+    if epsa_result is None:
+        return 0.0
+
+    decision = getattr(epsa_result, "sufficiency_decision", None)
+    if decision is not None:
+        return safe_float(getattr(decision, "confidence", 0.0), default=0.0)
+
+    return safe_float(getattr(epsa_result, "confidence", 0.0), default=0.0)
+
+
+def safe_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def choose_context_for_final_answer(
@@ -525,6 +652,8 @@ def build_error_record(
         "epsa_hop1_sufficient": False,
         "epsa_final_sufficient": False,
         "adaptive_stop_after_hop": "error",
+        "insufficient_fallback_strategy": "fixed",
+        "resolved_insufficient_fallback_doc_limit": None,
         "selected_context_docs": 0,
         "selected_context_sentences": 0,
         "estimated_context_tokens": 0,
@@ -589,7 +718,17 @@ def main() -> None:
             temperature=args.temperature,
             final_answer_max_tokens=args.final_answer_max_tokens,
             max_paths=args.epsa_max_paths,
+            insufficient_fallback_strategy=args.insufficient_fallback_strategy,
             insufficient_fallback_doc_limit=args.insufficient_fallback_doc_limit,
+            adaptive_fallback_high_confidence_threshold=(
+                args.adaptive_fallback_high_confidence_threshold
+            ),
+            adaptive_fallback_medium_confidence_threshold=(
+                args.adaptive_fallback_medium_confidence_threshold
+            ),
+            adaptive_fallback_high_confidence_limit=args.adaptive_fallback_high_confidence_limit,
+            adaptive_fallback_medium_confidence_limit=args.adaptive_fallback_medium_confidence_limit,
+            adaptive_fallback_low_confidence_limit=args.adaptive_fallback_low_confidence_limit,
         ),
     )
 
@@ -638,7 +777,17 @@ def main() -> None:
         "temperature": args.temperature,
         "final_answer_max_tokens": args.final_answer_max_tokens,
         "epsa_max_paths": args.epsa_max_paths,
+        "insufficient_fallback_strategy": args.insufficient_fallback_strategy,
         "insufficient_fallback_doc_limit": args.insufficient_fallback_doc_limit,
+        "adaptive_fallback_high_confidence_threshold": (
+            args.adaptive_fallback_high_confidence_threshold
+        ),
+        "adaptive_fallback_medium_confidence_threshold": (
+            args.adaptive_fallback_medium_confidence_threshold
+        ),
+        "adaptive_fallback_high_confidence_limit": args.adaptive_fallback_high_confidence_limit,
+        "adaptive_fallback_medium_confidence_limit": args.adaptive_fallback_medium_confidence_limit,
+        "adaptive_fallback_low_confidence_limit": args.adaptive_fallback_low_confidence_limit,
     }
 
     summary_json_path.write_text(
@@ -672,13 +821,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hop2-top-k", type=int, default=10)
     parser.add_argument("--epsa-max-paths", type=int, default=10)
     parser.add_argument(
+        "--insufficient-fallback-strategy",
+        choices=("fixed", "adaptive"),
+        default="fixed",
+        help=(
+            "Fallback strategy when EPSA marks evidence insufficient. "
+            "'fixed' preserves Chat 17 behavior. 'adaptive' varies the bounded "
+            "fallback size using deterministic EPSA sufficiency confidence."
+        ),
+    )
+    parser.add_argument(
         "--insufficient-fallback-doc-limit",
         type=int,
         default=8,
         help=(
             "Maximum number of retrieved documents to send when EPSA marks evidence "
-            "insufficient. Use 0 or a negative value to disable bounding."
+            "insufficient and --insufficient-fallback-strategy=fixed. Use 0 or a "
+            "negative value to disable fixed-strategy bounding."
         ),
+    )
+    parser.add_argument(
+        "--adaptive-fallback-high-confidence-threshold",
+        type=float,
+        default=0.48,
+        help="Use the high-confidence adaptive fallback limit at or above this confidence.",
+    )
+    parser.add_argument(
+        "--adaptive-fallback-medium-confidence-threshold",
+        type=float,
+        default=0.42,
+        help="Use the medium-confidence adaptive fallback limit at or above this confidence.",
+    )
+    parser.add_argument(
+        "--adaptive-fallback-high-confidence-limit",
+        type=int,
+        default=8,
+        help="Fallback document limit for near-sufficient insufficient EPSA decisions.",
+    )
+    parser.add_argument(
+        "--adaptive-fallback-medium-confidence-limit",
+        type=int,
+        default=10,
+        help="Fallback document limit for medium-confidence insufficient EPSA decisions.",
+    )
+    parser.add_argument(
+        "--adaptive-fallback-low-confidence-limit",
+        type=int,
+        default=12,
+        help="Fallback document limit for low-confidence insufficient EPSA decisions.",
     )
 
     parser.add_argument("--llm-model", default="gpt-4o-mini")

@@ -22,6 +22,7 @@ from scripts.run_epsa_rag import (
     is_potential_false_sufficient,
     merge_retrieved_candidates,
     object_to_dict,
+    resolve_insufficient_fallback_doc_limit,
     selected_chunk_ids_from_epsa,
     serialize_list_for_csv,
 
@@ -230,3 +231,139 @@ def test_choose_context_uses_prebounded_insufficient_fallback_documents() -> Non
     assert "Chunk ID: c1" in context
     assert "Chunk ID: c2" in context
     assert "Chunk ID: c3" not in context
+
+
+def test_fixed_fallback_strategy_preserves_existing_limit_behavior() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 13)
+    ]
+    epsa_result = SimpleNamespace(
+        sufficient=False,
+        sufficiency_decision=SimpleNamespace(sufficient=False, confidence=0.49),
+    )
+
+    bounded = bound_fallback_documents_for_context(
+        epsa_result=epsa_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+        insufficient_fallback_strategy="fixed",
+    )
+
+    assert [doc.chunk_id for doc in bounded] == [f"c{i}" for i in range(1, 9)]
+    assert (
+        resolve_insufficient_fallback_doc_limit(
+            epsa_result=epsa_result,
+            insufficient_fallback_doc_limit=8,
+            insufficient_fallback_strategy="fixed",
+        )
+        == 8
+    )
+
+
+def test_adaptive_fallback_uses_8_docs_for_near_sufficient_insufficient_case() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 13)
+    ]
+    epsa_result = SimpleNamespace(
+        sufficient=False,
+        sufficiency_decision=SimpleNamespace(sufficient=False, confidence=0.48),
+    )
+
+    bounded = bound_fallback_documents_for_context(
+        epsa_result=epsa_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+        insufficient_fallback_strategy="adaptive",
+    )
+
+    assert [doc.chunk_id for doc in bounded] == [f"c{i}" for i in range(1, 9)]
+    assert (
+        resolve_insufficient_fallback_doc_limit(
+            epsa_result=epsa_result,
+            insufficient_fallback_strategy="adaptive",
+        )
+        == 8
+    )
+
+
+def test_adaptive_fallback_uses_10_docs_for_medium_confidence_insufficient_case() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 13)
+    ]
+    epsa_result = SimpleNamespace(
+        sufficient=False,
+        sufficiency_decision=SimpleNamespace(sufficient=False, confidence=0.42),
+    )
+
+    bounded = bound_fallback_documents_for_context(
+        epsa_result=epsa_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+        insufficient_fallback_strategy="adaptive",
+    )
+
+    assert [doc.chunk_id for doc in bounded] == [f"c{i}" for i in range(1, 11)]
+    assert (
+        resolve_insufficient_fallback_doc_limit(
+            epsa_result=epsa_result,
+            insufficient_fallback_strategy="adaptive",
+        )
+        == 10
+    )
+
+
+def test_adaptive_fallback_uses_12_docs_for_low_confidence_insufficient_case() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 15)
+    ]
+    epsa_result = SimpleNamespace(
+        sufficient=False,
+        sufficiency_decision=SimpleNamespace(sufficient=False, confidence=0.30),
+    )
+
+    bounded = bound_fallback_documents_for_context(
+        epsa_result=epsa_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+        insufficient_fallback_strategy="adaptive",
+    )
+
+    assert [doc.chunk_id for doc in bounded] == [f"c{i}" for i in range(1, 13)]
+    assert (
+        resolve_insufficient_fallback_doc_limit(
+            epsa_result=epsa_result,
+            insufficient_fallback_strategy="adaptive",
+        )
+        == 12
+    )
+
+
+def test_adaptive_fallback_does_not_bound_epsa_sufficient_cases() -> None:
+    docs = [
+        RAGDocument(chunk_id=f"c{i}", title=f"Title {i}", text=f"Text {i}")
+        for i in range(1, 13)
+    ]
+    epsa_result = SimpleNamespace(
+        sufficient=True,
+        sufficiency_decision=SimpleNamespace(sufficient=True, confidence=0.90),
+    )
+
+    unbounded = bound_fallback_documents_for_context(
+        epsa_result=epsa_result,
+        fallback_documents=docs,
+        insufficient_fallback_doc_limit=8,
+        insufficient_fallback_strategy="adaptive",
+    )
+
+    assert [doc.chunk_id for doc in unbounded] == [f"c{i}" for i in range(1, 13)]
+    assert (
+        resolve_insufficient_fallback_doc_limit(
+            epsa_result=epsa_result,
+            insufficient_fallback_strategy="adaptive",
+        )
+        is None
+    )
