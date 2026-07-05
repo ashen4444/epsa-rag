@@ -185,6 +185,27 @@ class SufficiencyDecisionEngine:
                 continue
             trace.append(f"relation_matches={matched_relations}/{len(required_relations)}")
 
+            role_coverage = compute_role_aware_path_coverage(
+                question_analysis=question_analysis,
+                evidence_graph=evidence_graph,
+                path=path,
+                bridge_entity=bridge_entity,
+            )
+            trace.extend(_role_relevance_trace_entries(role_coverage))
+            if not has_role_relevant_evidence_path(
+                question_type="bridge",
+                role_coverage=role_coverage,
+            ):
+                trace.append("role_relevance_guard=false")
+                best_partial_missing = _role_relevance_missing_evidence(
+                    question_type="bridge",
+                    role_coverage=role_coverage,
+                    bridge_entity=bridge_entity,
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("role_relevance_guard=true")
+
             coverage = compute_selected_evidence_coverage(evidence_graph, selected_ids)
             trace.extend(_coverage_trace_entries(coverage))
             if not has_minimum_evidence_coverage(
@@ -298,6 +319,25 @@ class SufficiencyDecisionEngine:
                 best_partial_trace = trace
                 continue
             trace.append("answer_type_compatible=true")
+
+            role_coverage = compute_role_aware_path_coverage(
+                question_analysis=question_analysis,
+                evidence_graph=evidence_graph,
+                path=path,
+            )
+            trace.extend(_role_relevance_trace_entries(role_coverage))
+            if not has_role_relevant_evidence_path(
+                question_type="factoid",
+                role_coverage=role_coverage,
+            ):
+                trace.append("role_relevance_guard=false")
+                best_partial_missing = _role_relevance_missing_evidence(
+                    question_type="factoid",
+                    role_coverage=role_coverage,
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("role_relevance_guard=true")
 
             matched_relations = _matched_relation_count(path.relation_chain, required_relations)
             if required_relations and matched_relations < len(required_relations):
@@ -994,6 +1034,71 @@ def _looks_like_generic_entity_candidate(candidate: str | None) -> bool:
     return len(normalized) >= 2
 
 
+
+def _looks_like_numeric_quantity(text: str) -> bool:
+    """Return True for direct numeric/quantity answers, not title-like entities.
+
+    EPSA should not accept a title such as "2013 Liqui Moly Bathurst 12 Hour"
+    as a NUMBER answer merely because the title contains digits.
+    """
+
+    cleaned = _as_text(text).strip(" ,.;:()[]{}")
+    if not cleaned:
+        return False
+
+    if _looks_like_title_like_numeric_entity(cleaned):
+        return False
+
+    quantity_pattern = re.compile(
+        r"^"
+        r"(?:about|approximately|around|over|under|at least|at most|more than|less than)?\s*"
+        r"\d+(?:,\d{3})*(?:\.\d+)?"
+        r"(?:\s*(?:%|percent|percentage|km|kilometer|kilometers|metre|metres|meter|meters|"
+        r"mile|miles|foot|feet|ft|year|years|old|age|long|people|residents|inhabitants|"
+        r"episodes|episode|seasons|season|members|member|seats|seat|votes|vote|million|billion|thousand))*"
+        r"$",
+        flags=re.IGNORECASE,
+    )
+    if quantity_pattern.match(cleaned):
+        return True
+
+    numeric_tokens = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", cleaned)
+    if len(numeric_tokens) != 1:
+        return False
+
+    allowed_words = {
+        "about", "approximately", "around", "over", "under", "at", "least", "most", "more", "than", "less",
+        "percent", "percentage", "km", "kilometer", "kilometers", "metre", "metres", "meter", "meters",
+        "mile", "miles", "foot", "feet", "ft", "year", "years", "old", "age", "long", "people",
+        "residents", "inhabitants", "episodes", "episode", "seasons", "season", "members", "member",
+        "seats", "seat", "votes", "vote", "million", "billion", "thousand",
+    }
+    non_numeric_tokens = [
+        token for token in re.findall(r"[A-Za-z%]+", _norm_label(cleaned)) if token not in allowed_words
+    ]
+    return not non_numeric_tokens
+
+
+def _looks_like_title_like_numeric_entity(text: str) -> bool:
+    cleaned = _as_text(text).strip()
+    if not re.search(r"\d", cleaned):
+        return False
+
+    alpha_tokens = [token for token in re.findall(r"[A-Za-z][A-Za-z'&-]*", cleaned)]
+    if len(alpha_tokens) < 2:
+        return False
+
+    capitalized_tokens = [token for token in alpha_tokens if token[:1].isupper()]
+    if len(capitalized_tokens) >= 2:
+        return True
+
+    title_markers = {
+        "film", "movie", "book", "novel", "album", "song", "series", "episode", "game",
+        "race", "hour", "cup", "championship", "tournament", "award", "season",
+    }
+    return bool(set(_norm_label(cleaned).split()).intersection(title_markers))
+
+
 def _looks_like_number_candidate(candidate: str | None) -> bool:
     text = _as_text(candidate).strip()
     if not text:
@@ -1004,7 +1109,7 @@ def _looks_like_number_candidate(candidate: str | None) -> bool:
         return False
 
     if re.search(r"\d", text):
-        return True
+        return _looks_like_numeric_quantity(text)
 
     number_words = {
         "zero",
@@ -1408,6 +1513,219 @@ def _looks_like_title_or_work_candidate(candidate: str | None) -> bool:
     return False
 
 
+def compute_role_aware_path_coverage(
+    *,
+    question_analysis: QuestionAnalysis,
+    evidence_graph: EvidenceGraph,
+    path: EvidencePath,
+    bridge_entity: str | None = None,
+) -> dict[str, Any]:
+    """Return deterministic role-relevance features for a candidate evidence path.
+
+    This guard checks whether the selected path actually assigns evidence to the
+    expected reasoning roles. It uses only runtime graph/path metadata, never gold
+    supporting titles.
+    """
+
+    seed_labels = _meaningful_seed_labels(_seed_labels(question_analysis, evidence_graph))
+    sentence_node_ids = _ordered_sentence_node_ids_for_path(evidence_graph, path)
+    selected_sentence_nodes = [
+        evidence_graph.nodes[node_id]
+        for node_id in sentence_node_ids
+        if node_id in evidence_graph.nodes
+    ]
+
+    seed_side_node = selected_sentence_nodes[0] if selected_sentence_nodes else None
+    answer_side_node = selected_sentence_nodes[-1] if selected_sentence_nodes else None
+
+    seed_side_text = _node_role_text(seed_side_node)
+    answer_side_text = _node_role_text(answer_side_node)
+    selected_text = " ".join(_node_role_text(node) for node in selected_sentence_nodes)
+
+    answer_candidate = _as_text(path.answer_candidate)
+    bridge = _as_text(bridge_entity or path.metadata.get("bridge_entity"))
+
+    seed_side_has_seed = True if not seed_labels else _text_or_edges_mention_any(
+        text=seed_side_text,
+        labels=seed_labels,
+        evidence_graph=evidence_graph,
+        sentence_node=seed_side_node,
+    )
+    selected_evidence_has_seed = True if not seed_labels else _text_or_edges_mention_any(
+        text=selected_text,
+        labels=seed_labels,
+        evidence_graph=evidence_graph,
+        sentence_node=None,
+        selected_sentence_node_ids=sentence_node_ids,
+    )
+    seed_side_has_bridge = True if not bridge else _text_or_edges_mention_any(
+        text=seed_side_text,
+        labels=[bridge],
+        evidence_graph=evidence_graph,
+        sentence_node=seed_side_node,
+    )
+    answer_side_has_bridge = True if not bridge else _text_or_edges_mention_any(
+        text=answer_side_text,
+        labels=[bridge],
+        evidence_graph=evidence_graph,
+        sentence_node=answer_side_node,
+    )
+    answer_side_has_answer = True if not answer_candidate else _text_or_edges_mention_any(
+        text=answer_side_text,
+        labels=[answer_candidate],
+        evidence_graph=evidence_graph,
+        sentence_node=answer_side_node,
+    )
+    selected_evidence_has_answer = True if not answer_candidate else _text_or_edges_mention_any(
+        text=selected_text,
+        labels=[answer_candidate],
+        evidence_graph=evidence_graph,
+        sentence_node=None,
+        selected_sentence_node_ids=sentence_node_ids,
+    )
+
+    return {
+        "sentence_node_ids": sentence_node_ids,
+        "sentence_count": len(sentence_node_ids),
+        "seed_labels": seed_labels,
+        "bridge_entity": bridge,
+        "answer_candidate": answer_candidate,
+        "seed_side_has_seed": seed_side_has_seed,
+        "selected_evidence_has_seed": selected_evidence_has_seed,
+        "seed_side_has_bridge": seed_side_has_bridge,
+        "answer_side_has_bridge": answer_side_has_bridge,
+        "answer_side_has_answer": answer_side_has_answer,
+        "selected_evidence_has_answer": selected_evidence_has_answer,
+    }
+
+
+def has_role_relevant_evidence_path(
+    *,
+    question_type: str,
+    role_coverage: dict[str, Any],
+) -> bool:
+    normalized_question_type = _norm_label(question_type).replace("-", "_")
+
+    if normalized_question_type == "bridge":
+        return bool(
+            role_coverage.get("sentence_count", 0) >= 2
+            and role_coverage.get("seed_side_has_seed")
+            and role_coverage.get("seed_side_has_bridge")
+            and role_coverage.get("answer_side_has_bridge")
+        )
+
+    if normalized_question_type == "factoid":
+        return bool(
+            role_coverage.get("sentence_count", 0) >= 1
+            and role_coverage.get("selected_evidence_has_seed")
+            and role_coverage.get("selected_evidence_has_answer")
+        )
+
+    return True
+
+
+def _role_relevance_missing_evidence(
+    *,
+    question_type: str,
+    role_coverage: dict[str, Any],
+    bridge_entity: str | None = None,
+) -> str:
+    normalized_question_type = _norm_label(question_type).replace("-", "_")
+
+    if role_coverage.get("sentence_count", 0) == 0:
+        return "No sentence evidence is available for role-aware path checking."
+
+    if normalized_question_type == "bridge":
+        bridge = bridge_entity or role_coverage.get("bridge_entity") or "the bridge entity"
+        if not role_coverage.get("seed_side_has_seed"):
+            return "Bridge path seed-side evidence is not clearly connected to a question seed entity."
+        if not role_coverage.get("seed_side_has_bridge"):
+            return f"Bridge path seed-side evidence does not clearly ground bridge entity {bridge}."
+        if not role_coverage.get("answer_side_has_bridge"):
+            return f"Bridge path answer-side evidence is not clearly about bridge entity {bridge}."
+        return "Bridge path failed role-aware relevance checking."
+
+    if normalized_question_type == "factoid":
+        if not role_coverage.get("selected_evidence_has_seed"):
+            return "Factoid evidence is not clearly connected to a question seed entity."
+        if not role_coverage.get("selected_evidence_has_answer"):
+            return "Factoid evidence does not clearly ground the answer candidate."
+        return "Factoid path failed role-aware relevance checking."
+
+    return f"Path failed role-aware relevance checking for {question_type}."
+
+
+def _role_relevance_trace_entries(role_coverage: dict[str, Any]) -> list[str]:
+    return [
+        f"role_sentence_count={role_coverage.get('sentence_count', 0)}",
+        f"role_seed_side_has_seed={str(bool(role_coverage.get('seed_side_has_seed'))).lower()}",
+        f"role_selected_evidence_has_seed={str(bool(role_coverage.get('selected_evidence_has_seed'))).lower()}",
+        f"role_seed_side_has_bridge={str(bool(role_coverage.get('seed_side_has_bridge'))).lower()}",
+        f"role_answer_side_has_bridge={str(bool(role_coverage.get('answer_side_has_bridge'))).lower()}",
+        f"role_answer_side_has_answer={str(bool(role_coverage.get('answer_side_has_answer'))).lower()}",
+        f"role_selected_evidence_has_answer={str(bool(role_coverage.get('selected_evidence_has_answer'))).lower()}",
+    ]
+
+
+def _meaningful_seed_labels(seed_labels: list[str]) -> list[str]:
+    """Prefer complete seed mentions over weak single-token fragments."""
+
+    complete_labels = [
+        label
+        for label in seed_labels
+        if len(_norm_label(label).split()) >= 2 or bool(re.search(r"\d", _as_text(label)))
+    ]
+    return complete_labels or seed_labels
+
+
+def _node_role_text(node: Any | None) -> str:
+    if node is None:
+        return ""
+    return " ".join(
+        part
+        for part in (
+            _as_text(getattr(node, "label", "")),
+            _as_text(getattr(node, "metadata", {}).get("sentence_text", "")),
+            _as_text(getattr(node, "metadata", {}).get("resolved_text", "")),
+            _as_text(getattr(node, "metadata", {}).get("doc_title", "")),
+        )
+        if part
+    )
+
+
+def _text_or_edges_mention_any(
+    *,
+    text: str,
+    labels: list[str],
+    evidence_graph: EvidenceGraph,
+    sentence_node: Any | None,
+    selected_sentence_node_ids: list[str] | None = None,
+) -> bool:
+    if any(_labels_overlap(text, label) or _label_contains(text, _norm_label(label)) for label in labels):
+        return True
+
+    sentence_ids: set[str] = set(selected_sentence_node_ids or [])
+    if sentence_node is not None:
+        sentence_ids.add(sentence_node.node_id)
+
+    if not sentence_ids:
+        return False
+
+    label_norms = [_norm_label(label) for label in labels if _norm_label(label)]
+    for edge in evidence_graph.edges:
+        if edge.edge_type != "sentence_mentions_entity":
+            continue
+        if edge.source_id not in sentence_ids:
+            continue
+        target_node = evidence_graph.nodes.get(edge.target_id)
+        if target_node is None:
+            continue
+        target_label = target_node.label
+        if any(_labels_overlap(target_label, label) for label in label_norms):
+            return True
+    return False
+
+
 def _bridge_entity_grounded_in_answer_side_chunk(
     *,
     bridge_entity: str,
@@ -1754,4 +2072,10 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return unique
 
 
-__all__ = ["SufficiencyDecisionEngine", "compute_selected_evidence_coverage", "has_minimum_evidence_coverage"]
+__all__ = [
+    "SufficiencyDecisionEngine",
+    "compute_selected_evidence_coverage",
+    "has_minimum_evidence_coverage",
+    "compute_role_aware_path_coverage",
+    "has_role_relevant_evidence_path",
+]

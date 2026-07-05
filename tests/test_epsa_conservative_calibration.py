@@ -757,3 +757,244 @@ def test_coverage_guard_uses_doc_titles_before_chunk_count() -> None:
         question_type="bridge",
         coverage=coverage,
     ) is False
+
+
+def test_number_answer_candidate_rejects_title_like_numeric_entity() -> None:
+    analysis = _chat17_question_analysis(
+        "What is the length of the track where the 2013 Liqui Moly Bathurst 12 Hour was staged?",
+        answer_type=AnswerType.NUMBER,
+    )
+    path = _chat17_bridge_path("2013 Liqui Moly Bathurst 12 Hour")
+
+    decision = SufficiencyDecisionEngine().decide(
+        analysis,
+        _chat17_graph("NUMBER"),
+        [path],
+    )
+
+    assert decision.sufficient is False
+    assert "does not look compatible" in str(decision.missing_evidence)
+
+
+def test_role_aware_bridge_guard_rejects_weak_seed_side_grounding() -> None:
+    analysis = QuestionAnalysis(
+        raw_question="The Oberoi family is part of a hotel company that has a head office in what city?",
+        normalized_question="the oberoi family is part of a hotel company that has a head office in what city?",
+        question_type=QuestionType.BRIDGE,
+        expected_answer_type=AnswerType.LOCATION,
+        seed_entities=[EntityMention(text="Oberoi family", normalized="oberoi family", source="test")],
+        required_relation_hints=[RelationHint(relation="headquarters", matched_text="head office", source="test")],
+    )
+    graph = EvidenceGraph(
+        nodes={
+            "entity::oberoi_family": EvidenceGraphNode(
+                node_id="entity::oberoi_family",
+                node_type="entity",
+                label="Oberoi family",
+            ),
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label="A hotel company is associated with the Oberoi Group.",
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": "Generic hotel company",
+                    "sentence_text": "A hotel company is associated with the Oberoi Group.",
+                },
+            ),
+            "sentence::u2": EvidenceGraphNode(
+                node_id="sentence::u2",
+                node_type="sentence",
+                label="The Oberoi Group has its head office in Delhi.",
+                metadata={
+                    "evidence_unit_id": "u2",
+                    "chunk_id": "c2",
+                    "doc_title": "Oberoi Group",
+                    "sentence_text": "The Oberoi Group has its head office in Delhi.",
+                },
+            ),
+        },
+        edges=[
+            EvidenceGraphEdge(
+                edge_id="edge::u2_answer_type",
+                source_id="sentence::u2",
+                target_id="answer_type::location",
+                edge_type="sentence_has_answer_type",
+                metadata={"answer_type": "LOCATION"},
+            ),
+        ],
+        question_type="bridge",
+        seed_entity_node_ids=["entity::oberoi_family"],
+        metadata={"expected_answer_type": "LOCATION", "required_relation_hints": ["headquarters"]},
+    )
+    path = EvidencePath(
+        path_id="path::weak_seed_role",
+        question_type="bridge",
+        node_ids=[
+            "entity::oberoi_family",
+            "sentence::u1",
+            "entity::oberoi_group",
+            "sentence::u2",
+            "entity::delhi",
+        ],
+        edge_ids=[],
+        evidence_unit_ids=["u1", "u2"],
+        entity_chain=["Oberoi family", "Oberoi Group", "Delhi"],
+        relation_chain=["headquarters"],
+        answer_candidate="Delhi",
+        answer_type="LOCATION",
+        score=0.95,
+        metadata={"bridge_entity": "Oberoi Group"},
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is False
+    assert "seed-side evidence is not clearly connected" in str(decision.missing_evidence)
+    assert "role_relevance_guard=false" in decision.rule_trace
+
+
+def test_role_aware_factoid_guard_rejects_distractor_seedless_evidence() -> None:
+    analysis = QuestionAnalysis(
+        raw_question="The Thoen Stone is on display at a museum in what county?",
+        normalized_question="the thoen stone is on display at a museum in what county?",
+        question_type=QuestionType.FACTOID,
+        expected_answer_type=AnswerType.LOCATION,
+        seed_entities=[EntityMention(text="Thoen Stone", normalized="thoen stone", source="test")],
+        required_relation_hints=[],
+    )
+    graph = EvidenceGraph(
+        nodes={
+            "entity::thoen_stone": EvidenceGraphNode(
+                node_id="entity::thoen_stone",
+                node_type="entity",
+                label="Thoen Stone",
+            ),
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label="Clay County Historical Museum is located in Clay County.",
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": "Clay County Historical Museum",
+                    "sentence_text": "Clay County Historical Museum is located in Clay County.",
+                },
+            ),
+            "entity::clay_county": EvidenceGraphNode(
+                node_id="entity::clay_county",
+                node_type="entity",
+                label="Clay County",
+            ),
+        },
+        edges=[
+            EvidenceGraphEdge(
+                edge_id="edge::u1_answer_type",
+                source_id="sentence::u1",
+                target_id="answer_type::location",
+                edge_type="sentence_has_answer_type",
+                metadata={"answer_type": "LOCATION"},
+            ),
+            EvidenceGraphEdge(
+                edge_id="edge::u1_clay",
+                source_id="sentence::u1",
+                target_id="entity::clay_county",
+                edge_type="sentence_mentions_entity",
+            ),
+        ],
+        question_type="factoid",
+        seed_entity_node_ids=["entity::thoen_stone"],
+        metadata={"expected_answer_type": "LOCATION"},
+    )
+    path = EvidencePath(
+        path_id="path::seedless_factoid",
+        question_type="factoid",
+        node_ids=["entity::thoen_stone", "sentence::u1", "entity::clay_county"],
+        edge_ids=[],
+        evidence_unit_ids=["u1"],
+        entity_chain=["Thoen Stone", "Clay County"],
+        relation_chain=[],
+        answer_candidate="Clay County",
+        answer_type="LOCATION",
+        score=0.9,
+        metadata={},
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is False
+    assert "Factoid evidence is not clearly connected" in str(decision.missing_evidence)
+    assert "role_relevance_guard=false" in decision.rule_trace
+
+
+def test_role_aware_factoid_guard_keeps_direct_seed_answer_evidence_sufficient() -> None:
+    analysis = QuestionAnalysis(
+        raw_question="The Thoen Stone is on display at a museum in what county?",
+        normalized_question="the thoen stone is on display at a museum in what county?",
+        question_type=QuestionType.FACTOID,
+        expected_answer_type=AnswerType.LOCATION,
+        seed_entities=[EntityMention(text="Thoen Stone", normalized="thoen stone", source="test")],
+        required_relation_hints=[],
+    )
+    graph = EvidenceGraph(
+        nodes={
+            "entity::thoen_stone": EvidenceGraphNode(
+                node_id="entity::thoen_stone",
+                node_type="entity",
+                label="Thoen Stone",
+            ),
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label="The Thoen Stone is displayed in a museum in Lawrence County.",
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": "Thoen Stone",
+                    "sentence_text": "The Thoen Stone is displayed in a museum in Lawrence County.",
+                },
+            ),
+            "entity::lawrence_county": EvidenceGraphNode(
+                node_id="entity::lawrence_county",
+                node_type="entity",
+                label="Lawrence County",
+            ),
+        },
+        edges=[
+            EvidenceGraphEdge(
+                edge_id="edge::u1_answer_type",
+                source_id="sentence::u1",
+                target_id="answer_type::location",
+                edge_type="sentence_has_answer_type",
+                metadata={"answer_type": "LOCATION"},
+            ),
+            EvidenceGraphEdge(
+                edge_id="edge::u1_lawrence",
+                source_id="sentence::u1",
+                target_id="entity::lawrence_county",
+                edge_type="sentence_mentions_entity",
+            ),
+        ],
+        question_type="factoid",
+        seed_entity_node_ids=["entity::thoen_stone"],
+        metadata={"expected_answer_type": "LOCATION"},
+    )
+    path = EvidencePath(
+        path_id="path::direct_factoid",
+        question_type="factoid",
+        node_ids=["entity::thoen_stone", "sentence::u1", "entity::lawrence_county"],
+        edge_ids=[],
+        evidence_unit_ids=["u1"],
+        entity_chain=["Thoen Stone", "Lawrence County"],
+        relation_chain=[],
+        answer_candidate="Lawrence County",
+        answer_type="LOCATION",
+        score=0.9,
+        metadata={},
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is True
+    assert "role_relevance_guard=true" in decision.rule_trace
