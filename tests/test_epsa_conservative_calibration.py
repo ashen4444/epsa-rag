@@ -64,7 +64,11 @@ from epsa_rag.epsa.schemas import (
     QuestionAnalysis,
     RelationHint,
 )
-from epsa_rag.epsa.sufficiency_decision_engine import SufficiencyDecisionEngine
+from epsa_rag.epsa.sufficiency_decision_engine import (
+    SufficiencyDecisionEngine,
+    compute_selected_evidence_coverage,
+    has_minimum_evidence_coverage,
+)
 from epsa_rag.epsa.question_analyzer import AnswerType
 
 
@@ -638,3 +642,118 @@ def test_incomplete_answer_candidate_with_dangling_word_is_insufficient() -> Non
 
     assert decision.sufficient is False
     assert "incomplete after bridge entity" in str(decision.missing_evidence)
+
+def test_complete_bridge_records_passing_evidence_coverage() -> None:
+    decision = SufficiencyDecisionEngine().decide(
+        _chat17_question_analysis("Who developed the prototype pacemaker?"),
+        _chat17_graph("PERSON"),
+        [_chat17_bridge_path("R Adams Cowley")],
+    )
+
+    assert decision.sufficient is True
+    assert decision.metadata["evidence_coverage"]["covered_evidence_unit_count"] == 2
+    assert decision.metadata["evidence_coverage"]["evidence_source_count"] == 2
+    assert "coverage_guard=true" in decision.rule_trace
+
+
+def test_bridge_coverage_guard_rejects_single_document_bridge_path() -> None:
+    analysis = _chat17_question_analysis("Who developed the prototype pacemaker?")
+    graph = EvidenceGraph(
+        nodes={
+            "entity::seed": EvidenceGraphNode(
+                node_id="entity::seed",
+                node_type="entity",
+                label="Seed",
+            ),
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label="Seed to Bridge evidence.",
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": "Single Evidence Document",
+                    "sentence_text": "Seed is linked to Bridge.",
+                    "resolved_text": "Seed is linked to Bridge.",
+                },
+            ),
+            "sentence::u2": EvidenceGraphNode(
+                node_id="sentence::u2",
+                node_type="sentence",
+                label="Bridge to answer evidence.",
+                metadata={
+                    "evidence_unit_id": "u2",
+                    "chunk_id": "c2",
+                    "doc_title": "Single Evidence Document",
+                    "sentence_text": "Bridge is linked to R Adams Cowley.",
+                    "resolved_text": "Bridge is linked to R Adams Cowley.",
+                },
+            ),
+        },
+        edges=[
+            EvidenceGraphEdge(
+                edge_id="edge::u2_answer_type",
+                source_id="sentence::u2",
+                target_id="answer_type::person",
+                edge_type="sentence_has_answer_type",
+                metadata={"answer_type": "PERSON"},
+            ),
+        ],
+        question_type="bridge",
+        seed_entity_node_ids=["entity::seed"],
+        metadata={
+            "expected_answer_type": "PERSON",
+            "required_relation_hints": ["written"],
+        },
+    )
+
+    decision = SufficiencyDecisionEngine().decide(
+        analysis,
+        graph,
+        [_chat17_bridge_path("R Adams Cowley")],
+    )
+
+    assert decision.sufficient is False
+    assert "coverage is too narrow" in str(decision.missing_evidence)
+    assert "coverage_guard=false" in decision.rule_trace
+
+
+def test_coverage_guard_uses_doc_titles_before_chunk_count() -> None:
+    graph = EvidenceGraph(
+        nodes={
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label="First evidence sentence.",
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": "Same Document",
+                    "sentence_text": "First evidence sentence.",
+                },
+            ),
+            "sentence::u2": EvidenceGraphNode(
+                node_id="sentence::u2",
+                node_type="sentence",
+                label="Second evidence sentence.",
+                metadata={
+                    "evidence_unit_id": "u2",
+                    "chunk_id": "c2",
+                    "doc_title": "Same Document",
+                    "sentence_text": "Second evidence sentence.",
+                },
+            ),
+        },
+        edges=[],
+        question_type="bridge",
+    )
+
+    coverage = compute_selected_evidence_coverage(graph, ["u1", "u2"])
+
+    assert coverage["distinct_chunk_count"] == 2
+    assert coverage["distinct_doc_title_count"] == 1
+    assert coverage["evidence_source_count"] == 1
+    assert has_minimum_evidence_coverage(
+        question_type="bridge",
+        coverage=coverage,
+    ) is False

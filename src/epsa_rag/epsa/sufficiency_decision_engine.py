@@ -185,6 +185,21 @@ class SufficiencyDecisionEngine:
                 continue
             trace.append(f"relation_matches={matched_relations}/{len(required_relations)}")
 
+            coverage = compute_selected_evidence_coverage(evidence_graph, selected_ids)
+            trace.extend(_coverage_trace_entries(coverage))
+            if not has_minimum_evidence_coverage(
+                    question_type="bridge",
+                    coverage=coverage,
+            ):
+                trace.append("coverage_guard=false")
+                best_partial_missing = _coverage_missing_evidence(
+                    coverage=coverage,
+                    question_type="bridge",
+                )
+                best_partial_trace = trace
+                continue
+            trace.append("coverage_guard=true")
+
             trace.extend(["sufficient=true", "does_not_generate_next_query=true"])
             return self._sufficient(
                 question_analysis=question_analysis,
@@ -307,13 +322,31 @@ class SufficiencyDecisionEngine:
                 best_partial_trace = trace
                 continue
 
-            if _question_requires_multi_fact_evidence(question_analysis) and len(selected_ids) < 2:
+            requires_multi_fact_coverage = _question_requires_multi_fact_evidence(question_analysis)
+            if requires_multi_fact_coverage and len(selected_ids) < 2:
                 trace.append("complex_factoid_single_evidence_unit=true")
                 best_partial_missing = (
                     "Question appears to require multiple facts, but the candidate path has only one evidence unit."
                 )
                 best_partial_trace = trace
                 continue
+
+            if requires_multi_fact_coverage:
+                coverage = compute_selected_evidence_coverage(evidence_graph, selected_ids)
+                trace.extend(_coverage_trace_entries(coverage))
+                if not has_minimum_evidence_coverage(
+                        question_type="factoid",
+                        coverage=coverage,
+                        requires_multi_fact=True,
+                ):
+                    trace.append("coverage_guard=false")
+                    best_partial_missing = _coverage_missing_evidence(
+                        coverage=coverage,
+                        question_type="factoid",
+                    )
+                    best_partial_trace = trace
+                    continue
+                trace.append("coverage_guard=true")
 
             trace.extend(["sufficient=true", "does_not_generate_next_query=true"])
             return self._sufficient(
@@ -479,6 +512,7 @@ class SufficiencyDecisionEngine:
         selected_ids = _dedupe_preserve_order(best_path.evidence_unit_ids)
         expected_answer_type = _expected_answer_type(question_analysis, evidence_graph)
         answer_type = best_path.answer_type or expected_answer_type
+        coverage = compute_selected_evidence_coverage(evidence_graph, selected_ids)
         return SufficiencyDecision(
             sufficient=True,
             confidence=confidence,
@@ -494,6 +528,7 @@ class SufficiencyDecisionEngine:
             metadata={
                 "expected_answer_type": expected_answer_type,
                 "path_score": best_path.score,
+                "evidence_coverage": coverage,
                 **(metadata or {}),
             },
         )
@@ -608,6 +643,176 @@ class SufficiencyDecisionEngine:
                 if chunk_id:
                     _append_unique(chunk_ids, chunk_id)
         return chunk_ids
+
+
+def compute_selected_evidence_coverage(
+    evidence_graph: EvidenceGraph,
+    selected_evidence_unit_ids: Iterable[str],
+) -> dict[str, Any]:
+    """Return deterministic coverage features for selected evidence units.
+
+    The coverage score intentionally uses only runtime evidence-graph metadata.
+    It does not use gold supporting titles or any evaluation labels.
+    """
+
+    selected_ids = _dedupe_preserve_order(selected_evidence_unit_ids)
+    sentence_nodes_by_evidence_id = _sentence_nodes_by_evidence_unit_id(evidence_graph)
+
+    covered_ids: list[str] = []
+    chunk_ids: list[str] = []
+    doc_titles: list[str] = []
+    non_empty_sentence_count = 0
+
+    for evidence_id in selected_ids:
+        sentence_nodes = sentence_nodes_by_evidence_id.get(evidence_id, [])
+        if not sentence_nodes:
+            node = evidence_graph.nodes.get(evidence_id)
+            if node is not None and node.node_type == "sentence":
+                sentence_nodes = [node]
+
+        if not sentence_nodes:
+            continue
+
+        _append_unique(covered_ids, evidence_id)
+        for node in sentence_nodes:
+            chunk_id = _as_text(node.metadata.get("chunk_id"))
+            if chunk_id:
+                _append_unique(chunk_ids, chunk_id)
+
+            doc_title = _as_text(node.metadata.get("doc_title"))
+            if doc_title:
+                _append_unique(doc_titles, doc_title)
+
+            sentence_text = " ".join(
+                part
+                for part in (
+                    _as_text(node.label),
+                    _as_text(node.metadata.get("sentence_text")),
+                    _as_text(node.metadata.get("resolved_text")),
+                )
+                if part
+            ).strip()
+            if sentence_text:
+                non_empty_sentence_count += 1
+
+    missing_ids = [evidence_id for evidence_id in selected_ids if evidence_id not in set(covered_ids)]
+    evidence_source_count = len(doc_titles) if doc_titles else len(chunk_ids)
+
+    return {
+        "selected_evidence_unit_ids": selected_ids,
+        "covered_evidence_unit_ids": covered_ids,
+        "missing_evidence_unit_ids": missing_ids,
+        "selected_evidence_unit_count": len(selected_ids),
+        "covered_evidence_unit_count": len(covered_ids),
+        "distinct_chunk_ids": chunk_ids,
+        "distinct_chunk_count": len(chunk_ids),
+        "distinct_doc_titles": doc_titles,
+        "distinct_doc_title_count": len(doc_titles),
+        "evidence_source_count": evidence_source_count,
+        "non_empty_sentence_count": non_empty_sentence_count,
+    }
+
+
+def has_minimum_evidence_coverage(
+    *,
+    question_type: str,
+    coverage: dict[str, Any],
+    requires_multi_fact: bool = False,
+) -> bool:
+    """Return whether selected evidence has enough independent coverage.
+
+    Bridge/comparison and explicitly multi-fact cases need at least two covered
+    evidence units and at least two distinct evidence-bearing sources. When
+    document titles are available, titles are treated as the source; otherwise
+    chunk IDs are used as a fallback for older tests and sparse graph metadata.
+    """
+
+    normalized_question_type = _norm_label(question_type).replace("-", "_")
+    requires_two_sources = normalized_question_type in {"bridge", "comparison"} or requires_multi_fact
+
+    if coverage.get("missing_evidence_unit_ids"):
+        return False
+
+    covered_unit_count = _coverage_int(coverage, "covered_evidence_unit_count")
+    non_empty_sentence_count = _coverage_int(coverage, "non_empty_sentence_count")
+    evidence_source_count = _coverage_int(coverage, "evidence_source_count")
+
+    if requires_two_sources:
+        return (
+            covered_unit_count >= 2
+            and non_empty_sentence_count >= 2
+            and evidence_source_count >= 2
+        )
+
+    return covered_unit_count >= 1 and non_empty_sentence_count >= 1
+
+
+def _coverage_missing_evidence(
+    *,
+    coverage: dict[str, Any],
+    question_type: str,
+) -> str:
+    missing_ids = _as_text_list(coverage.get("missing_evidence_unit_ids"))
+    if missing_ids:
+        return (
+            "Selected evidence coverage is incomplete because evidence unit(s) "
+            f"are missing from the graph: {', '.join(missing_ids)}."
+        )
+
+    covered_unit_count = _coverage_int(coverage, "covered_evidence_unit_count")
+    non_empty_sentence_count = _coverage_int(coverage, "non_empty_sentence_count")
+    evidence_source_count = _coverage_int(coverage, "evidence_source_count")
+
+    if covered_unit_count < 2:
+        return (
+            f"Selected evidence coverage is too narrow for {question_type} sufficiency: "
+            f"only {covered_unit_count} covered evidence unit(s) found."
+        )
+
+    if non_empty_sentence_count < 2:
+        return (
+            f"Selected evidence coverage is too narrow for {question_type} sufficiency: "
+            f"only {non_empty_sentence_count} non-empty evidence sentence(s) found."
+        )
+
+    if evidence_source_count < 2:
+        return (
+            f"Selected evidence coverage is too narrow for {question_type} sufficiency: "
+            "selected evidence comes from fewer than two distinct evidence-bearing titles or chunks."
+        )
+
+    return f"Selected evidence does not pass minimum coverage for {question_type} sufficiency."
+
+
+def _coverage_trace_entries(coverage: dict[str, Any]) -> list[str]:
+    return [
+        f"coverage_units={coverage.get('covered_evidence_unit_count', 0)}/{coverage.get('selected_evidence_unit_count', 0)}",
+        f"coverage_chunks={coverage.get('distinct_chunk_count', 0)}",
+        f"coverage_doc_titles={coverage.get('distinct_doc_title_count', 0)}",
+        f"coverage_sources={coverage.get('evidence_source_count', 0)}",
+        f"coverage_non_empty_sentences={coverage.get('non_empty_sentence_count', 0)}",
+    ]
+
+
+def _sentence_nodes_by_evidence_unit_id(
+    evidence_graph: EvidenceGraph,
+) -> dict[str, list[Any]]:
+    nodes_by_evidence_id: dict[str, list[Any]] = {}
+    for node in evidence_graph.nodes.values():
+        if node.node_type != "sentence":
+            continue
+        evidence_unit_id = _as_text(node.metadata.get("evidence_unit_id"))
+        if not evidence_unit_id:
+            continue
+        nodes_by_evidence_id.setdefault(evidence_unit_id, []).append(node)
+    return nodes_by_evidence_id
+
+
+def _coverage_int(coverage: dict[str, Any], key: str) -> int:
+    try:
+        return int(coverage.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _question_type(question_analysis: QuestionAnalysis, evidence_graph: EvidenceGraph) -> str:
@@ -1549,4 +1754,4 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return unique
 
 
-__all__ = ["SufficiencyDecisionEngine"]
+__all__ = ["SufficiencyDecisionEngine", "compute_selected_evidence_coverage", "has_minimum_evidence_coverage"]
