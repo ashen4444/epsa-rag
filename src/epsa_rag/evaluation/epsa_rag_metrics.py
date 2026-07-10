@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from epsa_rag.evaluation.answer_metrics import RelaxedAnswerMatch, relaxed_answer_match
+
 
 BASELINE_REFERENCE: dict[str, float] = {
     "exact_match": 0.70,
@@ -94,6 +96,17 @@ def summarize_epsa_rag_records(
     final_sufficient_count = _count_truthy(records, "epsa_final_sufficient")
     potential_false_sufficient_count = _count_truthy(records, "potential_false_sufficient_candidate")
     potential_false_insufficient_count = _count_truthy(records, "potential_false_insufficient_candidate")
+    relaxed_results = [_record_relaxed_result(record) for record in records]
+    relaxed_answer_correct_count = sum(1 for result in relaxed_results if result.correct)
+    strict_vs_relaxed_disagreement_count = _count_records(
+        records,
+        lambda record: _record_exact_match(record) == 0.0
+        and _record_relaxed_result(record).correct,
+    )
+    potential_false_sufficient_relaxed_count = _count_records(
+        records,
+        _record_is_potential_false_sufficient_relaxed,
+    )
 
     gold_titles_available_count = _count_records(
         records,
@@ -135,6 +148,20 @@ def summarize_epsa_rag_records(
         "answer_precision": safe_mean([record.get("answer_precision") for record in records]),
         "answer_recall": safe_mean([record.get("answer_recall") for record in records]),
         "answer_f1": safe_mean([record.get("answer_f1") for record in records]),
+        "relaxed_answer_correct_count": relaxed_answer_correct_count,
+        "relaxed_answer_correct_rate": safe_rate(relaxed_answer_correct_count, total),
+        "strict_vs_relaxed_disagreement_count": strict_vs_relaxed_disagreement_count,
+        "strict_vs_relaxed_disagreement_rate": safe_rate(
+            strict_vs_relaxed_disagreement_count,
+            total,
+        ),
+        "potential_false_sufficient_relaxed_count": (
+            potential_false_sufficient_relaxed_count
+        ),
+        "potential_false_sufficient_relaxed_rate": safe_rate(
+            potential_false_sufficient_relaxed_count,
+            total,
+        ),
         "average_selected_context_docs": average_context_docs,
         "average_selected_context_sentences": safe_mean(
             [record.get("selected_context_sentences") for record in records]
@@ -273,6 +300,36 @@ def summarize_epsa_rag_records(
     )
 
     return summary
+
+
+def _record_relaxed_result(record: Mapping[str, Any]) -> RelaxedAnswerMatch:
+    if "relaxed_answer_correct" in record and "relaxed_match_type" in record:
+        return RelaxedAnswerMatch(
+            correct=_as_bool(record.get("relaxed_answer_correct")),
+            match_type=str(record.get("relaxed_match_type") or "no_match"),
+        )
+
+    return relaxed_answer_match(
+        record.get("predicted_answer"),
+        record.get("gold_answer"),
+    )
+
+
+def _record_exact_match(record: Mapping[str, Any]) -> float:
+    try:
+        return float(record.get("exact_match") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _record_is_potential_false_sufficient_relaxed(
+    record: Mapping[str, Any],
+) -> bool:
+    if "potential_false_sufficient_relaxed" in record:
+        return _as_bool(record.get("potential_false_sufficient_relaxed"))
+
+    strict_candidate = _as_bool(record.get("potential_false_sufficient_candidate"))
+    return bool(strict_candidate and not _record_relaxed_result(record).correct)
 
 
 def _count_truthy(records: Sequence[Mapping[str, Any]], field_name: str) -> int:

@@ -22,6 +22,7 @@ from epsa_rag.evaluation.answer_metrics import (
     answer_overlap_metrics,
     exact_match_score,
     partial_match_score,
+    relaxed_answer_match,
 )
 from epsa_rag.evaluation.epsa_rag_metrics import summarize_epsa_rag_records
 from epsa_rag.rag.llm_client import ChatLLM, OpenAIChatClient
@@ -232,6 +233,10 @@ class EPSAControlledRAGRunner:
         answer_overlap = answer_overlap_metrics(predicted_answer, gold_answer)
         exact_match = exact_match_score(predicted_answer, gold_answer) if gold_answer else 0.0
         partial_match = partial_match_score(predicted_answer, gold_answer) if gold_answer else 0.0
+        relaxed_match = relaxed_answer_match(predicted_answer, gold_answer)
+        strict_vs_relaxed_disagreement = bool(
+            gold_answer and exact_match == 0.0 and relaxed_match.correct
+        )
 
         selected_chunk_ids = selected_chunk_ids_from_epsa(final_epsa_result)
         selected_evidence_unit_ids = selected_evidence_unit_ids_from_epsa(final_epsa_result)
@@ -267,6 +272,9 @@ class EPSAControlledRAGRunner:
             "answer_precision": answer_overlap.precision if gold_answer else 0.0,
             "answer_recall": answer_overlap.recall if gold_answer else 0.0,
             "answer_f1": answer_overlap.f1 if gold_answer else 0.0,
+            "relaxed_answer_correct": bool(gold_answer and relaxed_match.correct),
+            "relaxed_match_type": relaxed_match.match_type if gold_answer else "missing_answer",
+            "strict_vs_relaxed_disagreement": strict_vs_relaxed_disagreement,
             "hop1_retrieved_count": len(hop1_candidates),
             "hop2_retrieved_count": len(hop2_candidates),
             "merged_retrieved_count": len(merged_candidates),
@@ -307,6 +315,13 @@ class EPSAControlledRAGRunner:
                 epsa_sufficient=final_sufficient,
                 exact_match=exact_match,
                 partial_match=partial_match,
+                final_answer_generation_failed=bool(final_answer_error),
+            ),
+            "potential_false_sufficient_relaxed": is_potential_false_sufficient_relaxed(
+                epsa_sufficient=final_sufficient,
+                exact_match=exact_match,
+                partial_match=partial_match,
+                relaxed_answer_correct=relaxed_match.correct,
                 final_answer_generation_failed=bool(final_answer_error),
             ),
             "potential_false_insufficient_candidate": is_potential_false_insufficient(
@@ -822,6 +837,29 @@ def is_potential_false_sufficient(
     return bool(epsa_sufficient and float(exact_match) == 0.0 and float(partial_match) == 0.0)
 
 
+def is_potential_false_sufficient_relaxed(
+    *,
+    epsa_sufficient: bool,
+    exact_match: float,
+    partial_match: float,
+    relaxed_answer_correct: bool,
+    final_answer_generation_failed: bool = False,
+) -> bool:
+    """Refine the existing strict false-sufficient candidate diagnostically.
+
+    The relaxed flag can only remove rows from the strict candidate set; it
+    never introduces additional false-sufficient candidates.
+    """
+
+    strict_candidate = is_potential_false_sufficient(
+        epsa_sufficient=epsa_sufficient,
+        exact_match=exact_match,
+        partial_match=partial_match,
+        final_answer_generation_failed=final_answer_generation_failed,
+    )
+    return bool(strict_candidate and not relaxed_answer_correct)
+
+
 def is_potential_false_insufficient(
     *,
     hop1_sufficient: bool,
@@ -870,6 +908,9 @@ def build_error_record(
         "answer_precision": 0.0,
         "answer_recall": 0.0,
         "answer_f1": 0.0,
+        "relaxed_answer_correct": False,
+        "relaxed_match_type": "missing_answer",
+        "strict_vs_relaxed_disagreement": False,
         "hop1_retrieved_count": 0,
         "hop2_retrieved_count": 0,
         "merged_retrieved_count": 0,
@@ -901,6 +942,7 @@ def build_error_record(
         "merged_retrieved_chunk_ids": serialize_list_for_csv([]),
         **gold_title_diagnostics,
         "potential_false_sufficient_candidate": False,
+        "potential_false_sufficient_relaxed": False,
         "potential_false_insufficient_candidate": False,
         "retrieval_failed": bool(retrieval_error),
         "final_answer_generation_failed": bool(final_answer_error),

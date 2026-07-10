@@ -24,6 +24,7 @@ from scripts.run_epsa_rag import (
     gold_title_coverage_status,
     is_potential_false_insufficient,
     is_potential_false_sufficient,
+    is_potential_false_sufficient_relaxed,
     matching_gold_titles,
     merge_retrieved_candidates,
     normalize_title_for_matching,
@@ -153,6 +154,29 @@ def test_potential_false_sufficient_flag_requires_sufficient_and_wrong_answer() 
         epsa_sufficient=False,
         exact_match=0.0,
         partial_match=0.0,
+    ) is False
+
+
+def test_relaxed_false_sufficient_flag_removes_relaxed_correct_rows_only() -> None:
+    assert is_potential_false_sufficient_relaxed(
+        epsa_sufficient=True,
+        exact_match=0.0,
+        partial_match=0.0,
+        relaxed_answer_correct=True,
+    ) is False
+
+    assert is_potential_false_sufficient_relaxed(
+        epsa_sufficient=True,
+        exact_match=0.0,
+        partial_match=0.0,
+        relaxed_answer_correct=False,
+    ) is True
+
+    assert is_potential_false_sufficient_relaxed(
+        epsa_sufficient=True,
+        exact_match=0.0,
+        partial_match=1.0,
+        relaxed_answer_correct=False,
     ) is False
 
 
