@@ -185,6 +185,19 @@ class SufficiencyDecisionEngine:
                 continue
             trace.append(f"relation_matches={matched_relations}/{len(required_relations)}")
 
+            anchor_coverage = compute_strong_question_anchor_coverage(
+                question_analysis=question_analysis,
+                evidence_graph=evidence_graph,
+                path=path,
+            )
+            trace.extend(_question_anchor_trace_entries(anchor_coverage))
+            if not has_strong_question_anchor_coverage(anchor_coverage):
+                trace.append("question_anchor_guard=false")
+                best_partial_missing = _question_anchor_missing_evidence(anchor_coverage)
+                best_partial_trace = trace
+                continue
+            trace.append("question_anchor_guard=true")
+
             role_coverage = compute_role_aware_path_coverage(
                 question_analysis=question_analysis,
                 evidence_graph=evidence_graph,
@@ -234,6 +247,7 @@ class SufficiencyDecisionEngine:
                     "bridge_entity": bridge_entity,
                     "matched_relation_count": matched_relations,
                     "required_relation_count": len(required_relations),
+                    "strong_question_anchor_coverage": anchor_coverage,
                     "makes_next_query": False,
                 },
             )
@@ -354,6 +368,19 @@ class SufficiencyDecisionEngine:
                 continue
             trace.append(f"relation_matches={matched_relations}/{len(required_relations)}")
 
+            anchor_coverage = compute_strong_question_anchor_coverage(
+                question_analysis=question_analysis,
+                evidence_graph=evidence_graph,
+                path=path,
+            )
+            trace.extend(_question_anchor_trace_entries(anchor_coverage))
+            if not has_strong_question_anchor_coverage(anchor_coverage):
+                trace.append("question_anchor_guard=false")
+                best_partial_missing = _question_anchor_missing_evidence(anchor_coverage)
+                best_partial_trace = trace
+                continue
+            trace.append("question_anchor_guard=true")
+
             if _generic_answer_type(expected_answer_type) and not required_relations and len(selected_ids) < 2:
                 trace.append("generic_answer_type_single_evidence_unit=true")
                 best_partial_missing = (
@@ -400,6 +427,7 @@ class SufficiencyDecisionEngine:
                 metadata={
                     "matched_relation_count": matched_relations,
                     "required_relation_count": len(required_relations),
+                    "strong_question_anchor_coverage": anchor_coverage,
                     "makes_next_query": False,
                 },
             )
@@ -1513,6 +1541,157 @@ def _looks_like_title_or_work_candidate(candidate: str | None) -> bool:
     return False
 
 
+def compute_strong_question_anchor_coverage(
+    *,
+    question_analysis: QuestionAnalysis,
+    evidence_graph: EvidenceGraph,
+    path: EvidencePath,
+) -> dict[str, Any]:
+    """Check whether selected path evidence contains a distinctive question anchor.
+
+    The guard is deliberately narrow. It activates only when the question has
+    an explicit quoted entity or a digit-bearing title/name phrase such as
+    ``Pirna 014`` or ``750 7th Avenue``. These anchors are available at runtime
+    from the question itself and do not use gold titles, answers, or labels.
+
+    This prevents a weak seed such as ``The``, ``Park Avenue``, or ``Emmy Award``
+    from making an unrelated path look answer-sufficient when the distinctive
+    question target is absent from every selected evidence sentence/title.
+    """
+
+    anchors = _strong_question_anchors(question_analysis)
+    sentence_node_ids = _ordered_sentence_node_ids_for_path(evidence_graph, path)
+    selected_text = " ".join(
+        _node_role_text(evidence_graph.nodes.get(node_id))
+        for node_id in sentence_node_ids
+    )
+    matched_anchors = [
+        anchor
+        for anchor in anchors
+        if _normalized_phrase_contains(selected_text, anchor)
+    ]
+
+    return {
+        "required": bool(anchors),
+        "strong_question_anchors": anchors,
+        "matched_question_anchors": matched_anchors,
+        "strong_question_anchor_count": len(anchors),
+        "matched_question_anchor_count": len(matched_anchors),
+        "selected_sentence_node_ids": sentence_node_ids,
+    }
+
+
+def has_strong_question_anchor_coverage(anchor_coverage: dict[str, Any]) -> bool:
+    """Return True when the narrow anchor guard is not needed or is satisfied."""
+
+    if not anchor_coverage.get("required"):
+        return True
+    return bool(anchor_coverage.get("matched_question_anchor_count", 0))
+
+
+def _strong_question_anchors(
+    question_analysis: QuestionAnalysis,
+) -> list[str]:
+    raw_question = _as_text(getattr(question_analysis, "raw_question", ""))
+    if not raw_question:
+        raw_question = _as_text(getattr(question_analysis, "normalized_question", ""))
+
+    anchors: list[str] = []
+
+    # Quoted spans are explicit question targets in many HotPotQA bridge
+    # questions, for example "Chuck" or "The Simpsons".
+    for pattern in (r'"([^"]+)"', r"'([^']+)'"):
+        for match in re.finditer(pattern, raw_question):
+            quoted = match.group(1).strip()
+            if quoted:
+                anchors.append(quoted)
+
+    # Capture contiguous title-like spans around numeric/alphanumeric tokens.
+    # Lowercase prose boundaries stop the span, so "episode 15 of the third
+    # season" does not become an anchor, while "Pirna 014" and
+    # "750 7th Avenue" do.
+    tokens = [
+        match.group(0)
+        for match in re.finditer(r"[A-Za-z0-9][A-Za-z0-9'&.-]*", raw_question)
+    ]
+    for index, token in enumerate(tokens):
+        if not any(character.isdigit() for character in token):
+            continue
+
+        left = index
+        for _ in range(2):
+            if left > 0 and _title_like_anchor_token(tokens[left - 1]):
+                left -= 1
+            else:
+                break
+
+        right = index
+        for _ in range(4):
+            if right + 1 < len(tokens) and _title_like_anchor_token(tokens[right + 1]):
+                right += 1
+            else:
+                break
+
+        candidate_tokens = tokens[left : right + 1]
+        while candidate_tokens and _norm_label(candidate_tokens[0]) in {"a", "an", "the"}:
+            candidate_tokens = candidate_tokens[1:]
+
+        if len(candidate_tokens) < 2:
+            continue
+        if not any(
+            any(character.isalpha() for character in candidate)
+            and candidate[:1].isupper()
+            for candidate in candidate_tokens
+        ):
+            continue
+
+        anchors.append(" ".join(candidate_tokens))
+
+    return _dedupe_preserve_order(anchors)
+
+
+def _title_like_anchor_token(token: str) -> bool:
+    return bool(
+        token
+        and (
+            token[:1].isupper()
+            or any(character.isdigit() for character in token)
+        )
+    )
+
+
+def _normalized_phrase_contains(container: str, phrase: str) -> bool:
+    container_norm = _normalize_anchor_phrase(container)
+    phrase_norm = _normalize_anchor_phrase(phrase)
+    if not container_norm or not phrase_norm:
+        return False
+    return f" {phrase_norm} " in f" {container_norm} "
+
+
+def _normalize_anchor_phrase(value: Any) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", _as_text(value).casefold()))
+
+
+def _question_anchor_missing_evidence(anchor_coverage: dict[str, Any]) -> str:
+    anchors = _as_text_list(anchor_coverage.get("strong_question_anchors"))
+    rendered = ", ".join(anchors) if anchors else "the explicit question target"
+    return (
+        "Selected evidence does not mention any strong question anchor "
+        f"({rendered}); the path may be connected through only a weak or generic seed."
+    )
+
+
+def _question_anchor_trace_entries(anchor_coverage: dict[str, Any]) -> list[str]:
+    return [
+        f"question_anchor_required={str(bool(anchor_coverage.get('required'))).lower()}",
+        (
+            "question_anchor_matches="
+            f"{anchor_coverage.get('matched_question_anchor_count', 0)}/"
+            f"{anchor_coverage.get('strong_question_anchor_count', 0)}"
+        ),
+    ]
+
+
 def compute_role_aware_path_coverage(
     *,
     question_analysis: QuestionAnalysis,
@@ -2076,6 +2255,8 @@ __all__ = [
     "SufficiencyDecisionEngine",
     "compute_selected_evidence_coverage",
     "has_minimum_evidence_coverage",
+    "compute_strong_question_anchor_coverage",
+    "has_strong_question_anchor_coverage",
     "compute_role_aware_path_coverage",
     "has_role_relevant_evidence_path",
 ]

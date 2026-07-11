@@ -998,3 +998,284 @@ def test_role_aware_factoid_guard_keeps_direct_seed_answer_evidence_sufficient()
 
     assert decision.sufficient is True
     assert "role_relevance_guard=true" in decision.rule_trace
+
+def _strong_anchor_factoid_case(
+    *,
+    sentence_text: str,
+    doc_title: str,
+    answer_candidate: str,
+) -> tuple[QuestionAnalysis, EvidenceGraph, EvidencePath]:
+    analysis = QuestionAnalysis(
+        raw_question=(
+            "The axial turbojet Pirna 014 was designed by engineers from this "
+            "German aircraft and aircraft engine manufacturer based in which city?"
+        ),
+        normalized_question=(
+            "the axial turbojet pirna 014 was designed by engineers from this "
+            "german aircraft and aircraft engine manufacturer based in which city?"
+        ),
+        question_type=QuestionType.FACTOID,
+        expected_answer_type=AnswerType.LOCATION,
+        seed_entities=[
+            EntityMention(text="The", normalized="the", source="test"),
+        ],
+        required_relation_hints=[
+            RelationHint(relation="located", matched_text="based in", source="test"),
+        ],
+    )
+    graph = EvidenceGraph(
+        nodes={
+            "entity::the": EvidenceGraphNode(
+                node_id="entity::the",
+                node_type="entity",
+                label="The",
+            ),
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label=sentence_text,
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": doc_title,
+                    "sentence_text": sentence_text,
+                    "resolved_text": sentence_text,
+                },
+            ),
+            "entity::answer": EvidenceGraphNode(
+                node_id="entity::answer",
+                node_type="entity",
+                label=answer_candidate,
+            ),
+        },
+        edges=[
+            EvidenceGraphEdge(
+                edge_id="edge::u1_answer_type",
+                source_id="sentence::u1",
+                target_id="answer_type::location",
+                edge_type="sentence_has_answer_type",
+                metadata={"answer_type": "LOCATION"},
+            ),
+            EvidenceGraphEdge(
+                edge_id="edge::u1_answer",
+                source_id="sentence::u1",
+                target_id="entity::answer",
+                edge_type="sentence_mentions_entity",
+            ),
+        ],
+        question_type="factoid",
+        seed_entity_node_ids=["entity::the"],
+        metadata={
+            "expected_answer_type": "LOCATION",
+            "required_relation_hints": ["located"],
+        },
+    )
+    path = EvidencePath(
+        path_id="path::strong_anchor_factoid",
+        question_type="factoid",
+        node_ids=["entity::the", "sentence::u1", "entity::answer"],
+        edge_ids=[],
+        evidence_unit_ids=["u1"],
+        entity_chain=["The", answer_candidate],
+        relation_chain=["located"],
+        answer_candidate=answer_candidate,
+        answer_type="LOCATION",
+        score=0.9,
+        metadata={},
+    )
+    return analysis, graph, path
+
+
+def _strong_anchor_bridge_case(
+    *,
+    seed_side_text: str,
+    seed_side_title: str,
+) -> tuple[QuestionAnalysis, EvidenceGraph, EvidencePath]:
+    analysis = QuestionAnalysis(
+        raw_question=(
+            'An Emmy Award winner and two-time Tony Award winner was on episode '
+            '15 of the third season of "Chuck". What is her name?'
+        ),
+        normalized_question=(
+            'an emmy award winner and two-time tony award winner was on episode '
+            '15 of the third season of "chuck". what is her name?'
+        ),
+        question_type=QuestionType.BRIDGE,
+        expected_answer_type=AnswerType.PERSON,
+        seed_entities=[
+            EntityMention(text="Emmy Award", normalized="emmy award", source="test"),
+        ],
+        required_relation_hints=[],
+    )
+    answer_side_text = (
+        "Outstanding Supporting Actress was awarded to Uzo Aduba."
+    )
+    graph = EvidenceGraph(
+        nodes={
+            "entity::emmy_award": EvidenceGraphNode(
+                node_id="entity::emmy_award",
+                node_type="entity",
+                label="Emmy Award",
+            ),
+            "entity::bridge": EvidenceGraphNode(
+                node_id="entity::bridge",
+                node_type="entity",
+                label="Outstanding Supporting Actress",
+            ),
+            "entity::answer": EvidenceGraphNode(
+                node_id="entity::answer",
+                node_type="entity",
+                label="Uzo Aduba",
+            ),
+            "sentence::u1": EvidenceGraphNode(
+                node_id="sentence::u1",
+                node_type="sentence",
+                label=seed_side_text,
+                metadata={
+                    "evidence_unit_id": "u1",
+                    "chunk_id": "c1",
+                    "doc_title": seed_side_title,
+                    "sentence_text": seed_side_text,
+                    "resolved_text": seed_side_text,
+                },
+            ),
+            "sentence::u2": EvidenceGraphNode(
+                node_id="sentence::u2",
+                node_type="sentence",
+                label=answer_side_text,
+                metadata={
+                    "evidence_unit_id": "u2",
+                    "chunk_id": "c2",
+                    "doc_title": "Award recipient",
+                    "sentence_text": answer_side_text,
+                    "resolved_text": answer_side_text,
+                },
+            ),
+        },
+        edges=[
+            EvidenceGraphEdge(
+                edge_id="edge::u1_bridge",
+                source_id="sentence::u1",
+                target_id="entity::bridge",
+                edge_type="sentence_mentions_entity",
+            ),
+            EvidenceGraphEdge(
+                edge_id="edge::u2_bridge",
+                source_id="sentence::u2",
+                target_id="entity::bridge",
+                edge_type="sentence_mentions_entity",
+            ),
+            EvidenceGraphEdge(
+                edge_id="edge::u2_answer",
+                source_id="sentence::u2",
+                target_id="entity::answer",
+                edge_type="sentence_mentions_entity",
+            ),
+            EvidenceGraphEdge(
+                edge_id="edge::u2_answer_type",
+                source_id="sentence::u2",
+                target_id="answer_type::person",
+                edge_type="sentence_has_answer_type",
+                metadata={"answer_type": "PERSON"},
+            ),
+        ],
+        question_type="bridge",
+        seed_entity_node_ids=["entity::emmy_award"],
+        metadata={
+            "expected_answer_type": "PERSON",
+            "required_relation_hints": [],
+        },
+    )
+    path = EvidencePath(
+        path_id="path::strong_anchor_bridge",
+        question_type="bridge",
+        node_ids=[
+            "entity::emmy_award",
+            "sentence::u1",
+            "entity::bridge",
+            "sentence::u2",
+            "entity::answer",
+        ],
+        edge_ids=[],
+        evidence_unit_ids=["u1", "u2"],
+        entity_chain=[
+            "Emmy Award",
+            "Outstanding Supporting Actress",
+            "Uzo Aduba",
+        ],
+        relation_chain=[],
+        answer_candidate="Uzo Aduba",
+        answer_type="PERSON",
+        score=0.9,
+        metadata={"bridge_entity": "Outstanding Supporting Actress"},
+    )
+    return analysis, graph, path
+
+
+def test_strong_numeric_question_anchor_rejects_generic_factoid_distractor() -> None:
+    analysis, graph, path = _strong_anchor_factoid_case(
+        sentence_text=(
+            "The Engine Alliance is an aircraft engine manufacturer based in "
+            "East Hartford, Connecticut."
+        ),
+        doc_title="Engine Alliance",
+        answer_candidate="Connecticut",
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is False
+    assert "strong question anchor" in str(decision.missing_evidence)
+    assert "question_anchor_guard=false" in decision.rule_trace
+
+
+def test_strong_numeric_question_anchor_keeps_grounded_factoid_sufficient() -> None:
+    analysis, graph, path = _strong_anchor_factoid_case(
+        sentence_text=(
+            "The Pirna 014 was designed by engineers from Junkers, which was "
+            "based in Dessau."
+        ),
+        doc_title="Pirna 014",
+        answer_candidate="Dessau",
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is True
+    assert "question_anchor_guard=true" in decision.rule_trace
+    assert decision.metadata["strong_question_anchor_coverage"][
+        "matched_question_anchor_count"
+    ] == 1
+
+
+def test_strong_quoted_question_anchor_rejects_award_only_bridge_distractor() -> None:
+    analysis, graph, path = _strong_anchor_bridge_case(
+        seed_side_text=(
+            "The Emmy Award category was Outstanding Supporting Actress."
+        ),
+        seed_side_title="Emmy Award",
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is False
+    assert "strong question anchor" in str(decision.missing_evidence)
+    assert "question_anchor_guard=false" in decision.rule_trace
+
+
+def test_strong_quoted_question_anchor_keeps_anchored_bridge_sufficient() -> None:
+    analysis, graph, path = _strong_anchor_bridge_case(
+        seed_side_text=(
+            'The "Chuck" episode featured an Emmy Award winner linked to the '
+            "Outstanding Supporting Actress category."
+        ),
+        seed_side_title="Chuck",
+    )
+
+    decision = SufficiencyDecisionEngine().decide(analysis, graph, [path])
+
+    assert decision.sufficient is True
+    assert "question_anchor_guard=true" in decision.rule_trace
+    assert decision.metadata["strong_question_anchor_coverage"][
+        "matched_question_anchor_count"
+    ] == 1
